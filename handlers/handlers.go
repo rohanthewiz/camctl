@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"camctl/cameras"
 	"camctl/presets"
 	"camctl/views"
 	"camctl/visca"
@@ -20,20 +21,22 @@ const (
 )
 
 // App holds shared state across all HTTP handlers: the VISCA client,
-// preset store, and current camera settings. The mutex protects the
-// VISCA client during reconnection.
+// preset store, camera store, and current camera settings.
+// The mutex protects the VISCA client during reconnection.
 type App struct {
 	mu       sync.RWMutex
 	Camera   *visca.Client
 	Presets  *presets.Store
+	Cameras  *cameras.Store
 	Settings views.Settings
 }
 
-// NewApp creates an App with the given preset store. The VISCA client
-// starts disconnected — the user connects via the settings UI.
-func NewApp(presetStore *presets.Store) *App {
+// NewApp creates an App with the given preset and camera stores.
+// The VISCA client starts disconnected — the user connects via the settings UI.
+func NewApp(presetStore *presets.Store, cameraStore *cameras.Store) *App {
 	return &App{
 		Presets: presetStore,
+		Cameras: cameraStore,
 		Settings: views.Settings{
 			CameraPort: visca.DefaultPort,
 		},
@@ -49,17 +52,25 @@ func (a *App) RegisterRoutes(s *rweb.Server) {
 	s.Post("/api/preset/set", a.handlePresetSet)
 	s.Post("/api/preset/label", a.handlePresetLabel)
 	s.Post("/api/settings", a.handleSettings)
+	s.Post("/api/camera/remove", a.handleCameraRemove)
 }
 
-// handleIndex renders the full page with current settings and presets.
+// handleIndex renders the full page with current settings, presets, and saved cameras.
 func (a *App) handleIndex(c rweb.Context) error {
 	a.mu.RLock()
 	settings := a.Settings
 	a.mu.RUnlock()
 
+	rawCams := a.Cameras.All()
+	camItems := make([]views.CameraItem, len(rawCams))
+	for i, cam := range rawCams {
+		camItems[i] = views.CameraItem{Label: cam.Label, IP: cam.IP, Port: cam.Port}
+	}
+
 	data := views.PageData{
 		Settings: settings,
 		Presets:  a.Presets.All(),
+		Cameras:  camItems,
 	}
 	return c.WriteHTML(views.RenderPage(data))
 }
@@ -142,7 +153,7 @@ func (a *App) handleZoom(c rweb.Context) error {
 }
 
 // handlePresetRecall recalls a saved camera position.
-// Expects form param "num" (0–4 for our 5 presets).
+// Expects form param "num" (0–5 for our 6 presets).
 func (a *App) handlePresetRecall(c rweb.Context) error {
 	num, err := strconv.Atoi(c.Request().FormValue("num"))
 	if err != nil || num < 0 || num > 5 {
@@ -164,7 +175,7 @@ func (a *App) handlePresetRecall(c rweb.Context) error {
 }
 
 // handlePresetSet saves the current camera position to a preset slot.
-// Expects form param "num" (0–4).
+// Expects form param "num" (0–5).
 func (a *App) handlePresetSet(c rweb.Context) error {
 	num, err := strconv.Atoi(c.Request().FormValue("num"))
 	if err != nil || num < 0 || num > 5 {
@@ -186,7 +197,7 @@ func (a *App) handlePresetSet(c rweb.Context) error {
 }
 
 // handlePresetLabel updates a preset's display label and persists it to disk.
-// Expects form params "num" (0–4) and "label" (text).
+// Expects form params "num" (0–5) and "label" (text).
 func (a *App) handlePresetLabel(c rweb.Context) error {
 	num, err := strconv.Atoi(c.Request().FormValue("num"))
 	if err != nil || num < 0 || num > 5 {
@@ -206,9 +217,11 @@ type settingsResponse struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// handleSettings updates the camera IP/port and attempts to connect.
-// Expects form params "ip" and "port".
+// handleSettings updates the camera IP/port, saves it to the camera list (when a
+// label is provided), and attempts to connect.
+// Expects form params "label" (optional), "ip", and "port".
 func (a *App) handleSettings(c rweb.Context) error {
+	label := c.Request().FormValue("label")
 	ip := c.Request().FormValue("ip")
 	portStr := c.Request().FormValue("port")
 
@@ -218,7 +231,7 @@ func (a *App) handleSettings(c rweb.Context) error {
 	}
 
 	a.mu.Lock()
-	// Tear down any existing connection before reconnecting
+	// Tear down any existing connection before reconnecting.
 	if a.Camera != nil {
 		_ = a.Camera.Close()
 	}
@@ -228,15 +241,30 @@ func (a *App) handleSettings(c rweb.Context) error {
 
 	if connectErr != nil {
 		a.Camera = nil
-		a.Settings = views.Settings{CameraIP: ip, CameraPort: port, Connected: false}
+		a.Settings = views.Settings{CameraLabel: label, CameraIP: ip, CameraPort: port, Connected: false}
 		a.mu.Unlock()
 
 		return c.WriteJSON(settingsResponse{Connected: false, Error: connectErr.Error()})
 	}
 
 	a.Camera = cam
-	a.Settings = views.Settings{CameraIP: ip, CameraPort: port, Connected: true}
+	a.Settings = views.Settings{CameraLabel: label, CameraIP: ip, CameraPort: port, Connected: true}
 	a.mu.Unlock()
 
+	// Persist the camera to the saved list when a label is provided.
+	if label != "" {
+		_ = a.Cameras.Upsert(cameras.Camera{Label: label, IP: ip, Port: port})
+	}
+
 	return c.WriteJSON(settingsResponse{Connected: true})
+}
+
+// handleCameraRemove removes a camera from the saved list.
+// Expects form param "label".
+func (a *App) handleCameraRemove(c rweb.Context) error {
+	label := c.Request().FormValue("label")
+	if err := a.Cameras.Remove(label); err != nil {
+		return serr.Wrap(err, "camera remove failed")
+	}
+	return c.WriteJSON(map[string]string{"status": "ok"})
 }

@@ -9,15 +9,24 @@ import (
 
 // Settings holds the current camera connection state for rendering.
 type Settings struct {
-	CameraIP   string
-	CameraPort int
-	Connected  bool
+	CameraLabel string
+	CameraIP    string
+	CameraPort  int
+	Connected   bool
+}
+
+// CameraItem is a saved camera entry passed from handlers to the view.
+type CameraItem struct {
+	Label string
+	IP    string
+	Port  int
 }
 
 // PageData bundles everything the main page template needs.
 type PageData struct {
 	Settings Settings
 	Presets  []presets.Preset
+	Cameras  []CameraItem
 }
 
 // RenderPage produces the full HTML page: D-pad, zoom indicator, presets, and settings.
@@ -60,7 +69,7 @@ func RenderPage(data PageData) string {
 					// Right column — presets and camera settings
 					b.DivClass("col").R(
 						renderPresets(b, data.Presets),
-						renderSettings(b, data.Settings),
+						renderSettings(b, data.Settings, data.Cameras),
 					),
 				),
 			),
@@ -76,7 +85,11 @@ func renderStatus(b *element.Builder, s Settings) *element.Builder {
 	statusText := "Disconnected"
 	if s.Connected {
 		statusClass = "status connected"
-		statusText = fmt.Sprintf("Connected to %s:%d", s.CameraIP, s.CameraPort)
+		label := s.CameraLabel
+		if label == "" {
+			label = s.CameraIP
+		}
+		statusText = fmt.Sprintf("Connected — %s (%s:%d)", label, s.CameraIP, s.CameraPort)
 	}
 	b.Div("id", "conn-status", "class", statusClass).T(statusText)
 	return b
@@ -130,7 +143,7 @@ func dpadButton(b *element.Builder, direction, label, id string) *element.Builde
 }
 
 // renderPresets creates 6 presets in a 3-per-row grid.
-// Each preset card has an editable label, a Recall button, and a Save button.
+// Each preset card has an editable label, a green GO button, and a muted Save button.
 func renderPresets(b *element.Builder, prs []presets.Preset) *element.Builder {
 	b.DivClass("section").R(
 		b.H2().T("Presets"),
@@ -144,9 +157,9 @@ func renderPresets(b *element.Builder, prs []presets.Preset) *element.Builder {
 							"onchange", fmt.Sprintf("saveLabel(%d, this.value)", p.Number),
 						).R(),
 						b.DivClass("preset-actions").R(
-							b.Button("class", "preset-btn recall",
+							b.Button("class", "preset-btn go",
 								"onclick", fmt.Sprintf("presetRecall(%d)", p.Number),
-							).T("Recall"),
+							).T("GO"),
 							b.Button("class", "preset-btn save",
 								"onclick", fmt.Sprintf("presetSet(%d)", p.Number),
 							).T("Save"),
@@ -159,8 +172,8 @@ func renderPresets(b *element.Builder, prs []presets.Preset) *element.Builder {
 	return b
 }
 
-// renderSettings creates the camera connection form.
-func renderSettings(b *element.Builder, s Settings) *element.Builder {
+// renderSettings creates the camera connection form with a saved-cameras list.
+func renderSettings(b *element.Builder, s Settings, cams []CameraItem) *element.Builder {
 	portStr := fmt.Sprintf("%d", s.CameraPort)
 	if s.CameraPort == 0 {
 		portStr = "52381"
@@ -168,6 +181,40 @@ func renderSettings(b *element.Builder, s Settings) *element.Builder {
 
 	b.DivClass("section settings").R(
 		b.H2().T("Camera Settings"),
+
+		// Saved cameras list
+		b.Wrap(func() {
+			if len(cams) > 0 {
+				b.DivClass("saved-cameras").R(
+					b.Wrap(func() {
+						for _, cam := range cams {
+							isActive := cam.IP == s.CameraIP && cam.Port == s.CameraPort && s.Connected
+							cardClass := "camera-item"
+							if isActive {
+								cardClass = "camera-item active"
+							}
+							portStr := fmt.Sprintf("%d", cam.Port)
+							onclick := fmt.Sprintf("loadCamera(%q,%q,%q)", cam.Label, cam.IP, portStr)
+							removeClick := fmt.Sprintf("removeCamera(%q,event)", cam.Label)
+							b.Div("class", cardClass, "onclick", onclick).R(
+								b.DivClass("camera-item-info").R(
+									b.Span("class", "camera-name").T(cam.Label),
+									b.Span("class", "camera-addr").T(fmt.Sprintf("%s:%d", cam.IP, cam.Port)),
+								),
+								b.Button("class", "camera-remove", "onclick", removeClick).T("×"),
+							)
+						}
+					}),
+				)
+			}
+		}),
+
+		// Form fields
+		b.DivClass("settings-row").R(
+			b.Label("for", "camera-label").T("Label"),
+			b.Input("type", "text", "id", "camera-label",
+				"value", s.CameraLabel, "placeholder", "Camera 1").R(),
+		),
 		b.DivClass("settings-row").R(
 			b.Label("for", "camera-ip").T("IP Address"),
 			b.Input("type", "text", "id", "camera-ip",
@@ -230,7 +277,7 @@ body {
 h1 {
 	text-align: center;
 	font-size: 1.8rem;
-	color: #e94560;
+	color: #f97316;
 	margin-bottom: 4px;
 }
 
@@ -250,7 +297,7 @@ h1 {
 	margin-bottom: 20px;
 }
 .connected    { background: #0f3d0f; color: #4caf50; border: 1px solid #4caf50; }
-.disconnected { background: #3d0f0f; color: #f44336; border: 1px solid #f44336; }
+.disconnected { background: #3d1a00; color: #f97316; border: 1px solid #f97316; }
 
 .section {
 	margin-bottom: 24px;
@@ -298,14 +345,14 @@ h2 {
 }
 
 .dpad-btn:active {
-	background: #e94560;
+	background: #f97316;
 	color: #fff;
 	transform: scale(0.95);
 }
 
 #btn-home {
 	background: #0f3460;
-	border-color: #e94560;
+	border-color: #f97316;
 }
 
 /* ---- Zoom ---- */
@@ -325,7 +372,7 @@ h2 {
 .zoom-level {
 	height: 100%;
 	width: 50%;
-	background: #e94560;
+	background: #f97316;
 	border-radius: 3px;
 	transition: width 0.15s;
 }
@@ -369,27 +416,95 @@ h2 {
 	border: none;
 	border-radius: 4px;
 	cursor: pointer;
-	font-weight: 600;
-	font-size: 0.8rem;
+	font-weight: 700;
+	font-size: 0.85rem;
 }
 
-.preset-btn.recall {
-	background: #0f3460;
-	color: #e0e0e0;
+/* GO button — vivid green, the main action */
+.preset-btn.go {
+	background: #166534;
+	color: #4ade80;
+	border: 1px solid #22c55e;
+	letter-spacing: 0.05em;
 }
-.preset-btn.recall:active { background: #e94560; color: #fff; }
+.preset-btn.go:hover  { background: #15803d; }
+.preset-btn.go:active { background: #16a34a; color: #fff; }
 
+/* Save button — intentionally muted so it's not clicked accidentally */
 .preset-btn.save {
-	background: #533483;
-	color: #e0e0e0;
+	background: #1e1b2e;
+	color: #555;
+	border: 1px solid #2a2740;
+	font-weight: 500;
 }
-.preset-btn.save:active { background: #e94560; color: #fff; }
+.preset-btn.save:hover  { color: #888; border-color: #444; }
+.preset-btn.save:active { background: #2a2740; color: #aaa; }
 
 /* ---- Settings ---- */
 .settings {
 	border-top: 1px solid #333;
 	padding-top: 20px;
 }
+
+/* Saved cameras list */
+.saved-cameras {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-bottom: 14px;
+}
+
+.camera-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	background: #16213e;
+	border: 1px solid #0f3460;
+	border-radius: 6px;
+	padding: 8px 10px;
+	cursor: pointer;
+	transition: border-color 0.15s, background 0.15s;
+}
+.camera-item:hover  { background: #1c2a50; border-color: #1a4a80; }
+.camera-item.active { border-color: #4caf50; background: #0d2b0d; }
+
+.camera-item-info {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+}
+
+.camera-name {
+	font-size: 0.9rem;
+	font-weight: 600;
+	color: #e0e0e0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.camera-addr {
+	font-size: 0.75rem;
+	color: #666;
+}
+
+.camera-item.active .camera-name { color: #4caf50; }
+.camera-item.active .camera-addr { color: #2d7a2d; }
+
+.camera-remove {
+	flex-shrink: 0;
+	background: transparent;
+	border: none;
+	color: #555;
+	font-size: 1.1rem;
+	cursor: pointer;
+	padding: 2px 4px;
+	border-radius: 4px;
+	line-height: 1;
+}
+.camera-remove:hover { color: #f97316; }
 
 .settings-row {
 	display: flex;
@@ -417,7 +532,7 @@ h2 {
 .connect-btn {
 	width: 100%;
 	padding: 10px;
-	background: #e94560;
+	background: #f97316;
 	color: #fff;
 	border: none;
 	border-radius: 8px;
@@ -425,7 +540,8 @@ h2 {
 	font-weight: 700;
 	cursor: pointer;
 }
-.connect-btn:active { background: #c73650; }
+.connect-btn:active   { background: #ea6b0a; }
+.connect-btn:disabled { background: #7a2030; cursor: not-allowed; }
 `
 }
 
@@ -487,7 +603,7 @@ function presetRecall(num) {
 }
 
 function presetSet(num) {
-	if (!confirm('Save current position to this preset?')) return;
+	if (!confirm('Save current camera position to this preset?')) return;
 	fetch('/api/preset/set', {
 		method: 'POST',
 		headers: {'Content-Type':'application/x-www-form-urlencoded'},
@@ -503,33 +619,58 @@ function saveLabel(num, label) {
 	});
 }
 
+// ---- Camera management ----
+
+// Load a saved camera into the form and connect immediately.
+function loadCamera(label, ip, port) {
+	document.getElementById('camera-label').value = label;
+	document.getElementById('camera-ip').value = ip;
+	document.getElementById('camera-port').value = port;
+	saveSettings();
+}
+
+// Remove a saved camera from the list (stop propagation so the card click doesn't fire).
+function removeCamera(label, event) {
+	event.stopPropagation();
+	fetch('/api/camera/remove', {
+		method: 'POST',
+		headers: {'Content-Type':'application/x-www-form-urlencoded'},
+		body: 'label=' + encodeURIComponent(label)
+	}).then(() => location.reload());
+}
+
 // ---- Settings ----
 function saveSettings() {
-	let ip = document.getElementById('camera-ip').value;
-	let port = document.getElementById('camera-port').value;
-	let btn = document.getElementById('connect-btn');
+	let label = document.getElementById('camera-label').value.trim();
+	let ip    = document.getElementById('camera-ip').value.trim();
+	let port  = document.getElementById('camera-port').value;
+	let btn   = document.getElementById('connect-btn');
 	btn.textContent = 'Connecting...';
+	btn.disabled = true;
 
 	fetch('/api/settings', {
 		method: 'POST',
 		headers: {'Content-Type':'application/x-www-form-urlencoded'},
-		body: 'ip=' + encodeURIComponent(ip) + '&port=' + port
+		body: 'label=' + encodeURIComponent(label) +
+		      '&ip='   + encodeURIComponent(ip) +
+		      '&port=' + port
 	})
 	.then(r => r.json())
 	.then(data => {
-		let el = document.getElementById('conn-status');
 		if (data.connected) {
-			el.className = 'status connected';
-			el.textContent = 'Connected to ' + ip + ':' + port;
-			btn.textContent = 'Connected';
+			// Reload so the saved-cameras list refreshes with the new entry.
+			location.reload();
 		} else {
+			let el = document.getElementById('conn-status');
 			el.className = 'status disconnected';
 			el.textContent = 'Connection failed: ' + (data.error || 'unknown');
 			btn.textContent = 'Connect';
+			btn.disabled = false;
 		}
 	})
 	.catch(() => {
 		btn.textContent = 'Connect';
+		btn.disabled = false;
 	});
 }
 `

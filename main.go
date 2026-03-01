@@ -1,6 +1,7 @@
 package main
 
 import (
+	"camctl/cameras"
 	"camctl/handlers"
 	"camctl/presets"
 	"log"
@@ -15,7 +16,13 @@ func main() {
 		log.Fatalf("failed to initialize presets: %v", err)
 	}
 
-	app := handlers.NewApp(presetStore)
+	// Initialize camera storage — creates cameras.json on first run
+	cameraStore, err := cameras.NewStore("")
+	if err != nil {
+		log.Fatalf("failed to initialize cameras: %v", err)
+	}
+
+	app := handlers.NewApp(presetStore, cameraStore)
 
 	// Web server on port 8383 — chosen to avoid common port conflicts
 	s := rweb.NewServer(rweb.ServerOptions{

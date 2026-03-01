@@ -18,3 +18,5 @@ templates/
 static/
 !static/.keep
 
+presets.json
+cameras.json
