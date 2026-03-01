@@ -1,0 +1,242 @@
+package handlers
+
+import (
+	"camctl/presets"
+	"camctl/views"
+	"camctl/visca"
+	"fmt"
+	"strconv"
+	"sync"
+
+	"github.com/rohanthewiz/rweb"
+	"github.com/rohanthewiz/serr"
+)
+
+// defaultPanSpeed and defaultTiltSpeed provide moderate movement rates.
+// VISCA allows pan 0x01–0x18 and tilt 0x01–0x17.
+const (
+	defaultPanSpeed  byte = 0x08
+	defaultTiltSpeed byte = 0x08
+)
+
+// App holds shared state across all HTTP handlers: the VISCA client,
+// preset store, and current camera settings. The mutex protects the
+// VISCA client during reconnection.
+type App struct {
+	mu       sync.RWMutex
+	Camera   *visca.Client
+	Presets  *presets.Store
+	Settings views.Settings
+}
+
+// NewApp creates an App with the given preset store. The VISCA client
+// starts disconnected — the user connects via the settings UI.
+func NewApp(presetStore *presets.Store) *App {
+	return &App{
+		Presets: presetStore,
+		Settings: views.Settings{
+			CameraPort: visca.DefaultPort,
+		},
+	}
+}
+
+// RegisterRoutes wires all handlers to the rweb server.
+func (a *App) RegisterRoutes(s *rweb.Server) {
+	s.Get("/", a.handleIndex)
+	s.Post("/api/move", a.handleMove)
+	s.Post("/api/zoom", a.handleZoom)
+	s.Post("/api/preset/recall", a.handlePresetRecall)
+	s.Post("/api/preset/set", a.handlePresetSet)
+	s.Post("/api/preset/label", a.handlePresetLabel)
+	s.Post("/api/settings", a.handleSettings)
+}
+
+// handleIndex renders the full page with current settings and presets.
+func (a *App) handleIndex(c rweb.Context) error {
+	a.mu.RLock()
+	settings := a.Settings
+	a.mu.RUnlock()
+
+	data := views.PageData{
+		Settings: settings,
+		Presets:  a.Presets.All(),
+	}
+	return c.WriteHTML(views.RenderPage(data))
+}
+
+// handleMove processes pan/tilt/home/stop commands.
+// Expects form param "direction": left, right, up, down, home, stop.
+func (a *App) handleMove(c rweb.Context) error {
+	direction := c.Request().FormValue("direction")
+
+	a.mu.RLock()
+	cam := a.Camera
+	a.mu.RUnlock()
+
+	if cam == nil || !cam.IsConnected() {
+		return c.WriteJSON(map[string]string{"error": "not connected"})
+	}
+
+	var err error
+	switch direction {
+	case "left":
+		err = cam.PanTilt(visca.DirLeft, visca.DirStop, defaultPanSpeed, defaultTiltSpeed)
+	case "right":
+		err = cam.PanTilt(visca.DirRight, visca.DirStop, defaultPanSpeed, defaultTiltSpeed)
+	case "up":
+		err = cam.PanTilt(visca.DirStop, visca.DirUp, defaultPanSpeed, defaultTiltSpeed)
+	case "down":
+		err = cam.PanTilt(visca.DirStop, visca.DirDown, defaultPanSpeed, defaultTiltSpeed)
+	case "home":
+		err = cam.Home()
+	case "stop":
+		err = cam.Stop()
+	default:
+		return c.WriteJSON(map[string]string{"error": "unknown direction"})
+	}
+
+	if err != nil {
+		return serr.Wrap(err, "move command failed", "direction", direction)
+	}
+	return c.WriteJSON(map[string]string{"status": "ok"})
+}
+
+// handleZoom processes zoom in/out/stop commands.
+// Expects form params "action" (in/out/stop) and optional "speed" (1–7).
+func (a *App) handleZoom(c rweb.Context) error {
+	action := c.Request().FormValue("action")
+	speedStr := c.Request().FormValue("speed")
+
+	// Parse speed, default to 4 (moderate)
+	speed := byte(4)
+	if speedStr != "" {
+		if s, err := strconv.Atoi(speedStr); err == nil && s >= 1 && s <= 7 {
+			speed = byte(s)
+		}
+	}
+
+	a.mu.RLock()
+	cam := a.Camera
+	a.mu.RUnlock()
+
+	if cam == nil || !cam.IsConnected() {
+		return c.WriteJSON(map[string]string{"error": "not connected"})
+	}
+
+	var err error
+	switch action {
+	case "in":
+		err = cam.ZoomIn(speed)
+	case "out":
+		err = cam.ZoomOut(speed)
+	case "stop":
+		err = cam.ZoomStop()
+	default:
+		return c.WriteJSON(map[string]string{"error": "unknown zoom action"})
+	}
+
+	if err != nil {
+		return serr.Wrap(err, "zoom command failed", "action", action)
+	}
+	return c.WriteJSON(map[string]string{"status": "ok"})
+}
+
+// handlePresetRecall recalls a saved camera position.
+// Expects form param "num" (0–4 for our 5 presets).
+func (a *App) handlePresetRecall(c rweb.Context) error {
+	num, err := strconv.Atoi(c.Request().FormValue("num"))
+	if err != nil || num < 0 || num > 5 {
+		return c.WriteJSON(map[string]string{"error": "invalid preset number"})
+	}
+
+	a.mu.RLock()
+	cam := a.Camera
+	a.mu.RUnlock()
+
+	if cam == nil || !cam.IsConnected() {
+		return c.WriteJSON(map[string]string{"error": "not connected"})
+	}
+
+	if err := cam.PresetRecall(byte(num)); err != nil {
+		return serr.Wrap(err, "preset recall failed", "num", fmt.Sprintf("%d", num))
+	}
+	return c.WriteJSON(map[string]string{"status": "ok"})
+}
+
+// handlePresetSet saves the current camera position to a preset slot.
+// Expects form param "num" (0–4).
+func (a *App) handlePresetSet(c rweb.Context) error {
+	num, err := strconv.Atoi(c.Request().FormValue("num"))
+	if err != nil || num < 0 || num > 5 {
+		return c.WriteJSON(map[string]string{"error": "invalid preset number"})
+	}
+
+	a.mu.RLock()
+	cam := a.Camera
+	a.mu.RUnlock()
+
+	if cam == nil || !cam.IsConnected() {
+		return c.WriteJSON(map[string]string{"error": "not connected"})
+	}
+
+	if err := cam.PresetSet(byte(num)); err != nil {
+		return serr.Wrap(err, "preset set failed", "num", fmt.Sprintf("%d", num))
+	}
+	return c.WriteJSON(map[string]string{"status": "ok"})
+}
+
+// handlePresetLabel updates a preset's display label and persists it to disk.
+// Expects form params "num" (0–4) and "label" (text).
+func (a *App) handlePresetLabel(c rweb.Context) error {
+	num, err := strconv.Atoi(c.Request().FormValue("num"))
+	if err != nil || num < 0 || num > 5 {
+		return c.WriteJSON(map[string]string{"error": "invalid preset number"})
+	}
+
+	label := c.Request().FormValue("label")
+	if err := a.Presets.UpdateLabel(num, label); err != nil {
+		return serr.Wrap(err, "preset label update failed")
+	}
+	return c.WriteJSON(map[string]string{"status": "ok"})
+}
+
+// settingsResponse is the JSON shape returned after a connection attempt.
+type settingsResponse struct {
+	Connected bool   `json:"connected"`
+	Error     string `json:"error,omitempty"`
+}
+
+// handleSettings updates the camera IP/port and attempts to connect.
+// Expects form params "ip" and "port".
+func (a *App) handleSettings(c rweb.Context) error {
+	ip := c.Request().FormValue("ip")
+	portStr := c.Request().FormValue("port")
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		port = visca.DefaultPort
+	}
+
+	a.mu.Lock()
+	// Tear down any existing connection before reconnecting
+	if a.Camera != nil {
+		_ = a.Camera.Close()
+	}
+
+	cam := visca.NewClient(ip, port)
+	connectErr := cam.Connect()
+
+	if connectErr != nil {
+		a.Camera = nil
+		a.Settings = views.Settings{CameraIP: ip, CameraPort: port, Connected: false}
+		a.mu.Unlock()
+
+		return c.WriteJSON(settingsResponse{Connected: false, Error: connectErr.Error()})
+	}
+
+	a.Camera = cam
+	a.Settings = views.Settings{CameraIP: ip, CameraPort: port, Connected: true}
+	a.mu.Unlock()
+
+	return c.WriteJSON(settingsResponse{Connected: true})
+}
