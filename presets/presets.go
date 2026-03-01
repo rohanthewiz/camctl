@@ -63,6 +63,8 @@ func (s *Store) UpdateLabel(num int, label string) error {
 }
 
 // load reads presets from the JSON file, creating defaults if the file doesn't exist.
+// If the file has fewer presets than expected (e.g., from an older version),
+// the missing slots are appended with default labels and persisted.
 func (s *Store) load() error {
 	data, err := os.ReadFile(s.file)
 	if os.IsNotExist(err) {
@@ -73,7 +75,21 @@ func (s *Store) load() error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, &s.presets)
+	if err := json.Unmarshal(data, &s.presets); err != nil {
+		return err
+	}
+
+	// Backfill any missing preset slots added in newer versions
+	if len(s.presets) < presetCount {
+		for i := len(s.presets); i < presetCount; i++ {
+			s.presets = append(s.presets, Preset{
+				Number: i,
+				Label:  fmt.Sprintf("Preset %d", i+1),
+			})
+		}
+		return s.save()
+	}
+	return nil
 }
 
 // save writes the current presets to disk as indented JSON.

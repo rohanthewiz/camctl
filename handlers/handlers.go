@@ -211,10 +211,23 @@ func (a *App) handlePresetLabel(c rweb.Context) error {
 	return c.WriteJSON(map[string]string{"status": "ok"})
 }
 
+// cameraJSON represents a saved camera in the settings response.
+type cameraJSON struct {
+	Label string `json:"label"`
+	IP    string `json:"ip"`
+	Port  int    `json:"port"`
+}
+
 // settingsResponse is the JSON shape returned after a connection attempt.
+// Includes the full saved-cameras list so the client can update the sidebar
+// without a page reload.
 type settingsResponse struct {
-	Connected bool   `json:"connected"`
-	Error     string `json:"error,omitempty"`
+	Connected bool         `json:"connected"`
+	Label     string       `json:"label,omitempty"`
+	IP        string       `json:"ip,omitempty"`
+	Port      int          `json:"port,omitempty"`
+	Error     string       `json:"error,omitempty"`
+	Cameras   []cameraJSON `json:"cameras"`
 }
 
 // handleSettings updates the camera IP/port, saves it to the camera list (when a
@@ -244,7 +257,11 @@ func (a *App) handleSettings(c rweb.Context) error {
 		a.Settings = views.Settings{CameraLabel: label, CameraIP: ip, CameraPort: port, Connected: false}
 		a.mu.Unlock()
 
-		return c.WriteJSON(settingsResponse{Connected: false, Error: connectErr.Error()})
+		return c.WriteJSON(settingsResponse{
+			Connected: false,
+			Error:     connectErr.Error(),
+			Cameras:   a.savedCamerasJSON(),
+		})
 	}
 
 	a.Camera = cam
@@ -256,7 +273,23 @@ func (a *App) handleSettings(c rweb.Context) error {
 		_ = a.Cameras.Upsert(cameras.Camera{Label: label, IP: ip, Port: port})
 	}
 
-	return c.WriteJSON(settingsResponse{Connected: true})
+	return c.WriteJSON(settingsResponse{
+		Connected: true,
+		Label:     label,
+		IP:        ip,
+		Port:      port,
+		Cameras:   a.savedCamerasJSON(),
+	})
+}
+
+// savedCamerasJSON converts the camera store into the JSON response format.
+func (a *App) savedCamerasJSON() []cameraJSON {
+	raw := a.Cameras.All()
+	out := make([]cameraJSON, len(raw))
+	for i, cam := range raw {
+		out[i] = cameraJSON{Label: cam.Label, IP: cam.IP, Port: cam.Port}
+	}
+	return out
 }
 
 // handleCameraRemove removes a camera from the saved list.

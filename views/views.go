@@ -33,7 +33,6 @@ type PageData struct {
 func RenderPage(data PageData) string {
 	b := element.NewBuilder()
 
-	b.WriteString("<!DOCTYPE html>")
 	b.Html("lang", "en").R(
 		b.Head().R(
 			b.Meta("charset", "utf-8").R(),
@@ -54,6 +53,8 @@ func RenderPage(data PageData) string {
 				b.DivClass("columns").R(
 					// Left column — movement controls
 					b.DivClass("col").R(
+						// Active camera indicator — prominently shows which camera is under control
+						renderActiveCamera(b, data.Settings),
 						renderDPad(b),
 
 						// Zoom indicator
@@ -73,6 +74,8 @@ func RenderPage(data PageData) string {
 					),
 				),
 			),
+			// Toast container for error/status notifications
+			b.Div("id", "toast-container", "class", "toast-container").R(),
 			b.Script().T(jsScript()),
 		),
 	)
@@ -92,6 +95,26 @@ func renderStatus(b *element.Builder, s Settings) *element.Builder {
 		statusText = fmt.Sprintf("Connected — %s (%s:%d)", label, s.CameraIP, s.CameraPort)
 	}
 	b.Div("id", "conn-status", "class", statusClass).T(statusText)
+	return b
+}
+
+// renderActiveCamera shows which camera is currently being controlled,
+// displayed prominently above the D-pad so the operator always knows the target.
+func renderActiveCamera(b *element.Builder, s Settings) *element.Builder {
+	if s.Connected {
+		label := s.CameraLabel
+		if label == "" {
+			label = s.CameraIP
+		}
+		b.Div("id", "active-camera", "class", "active-camera connected").R(
+			b.Span("class", "active-dot").R(),
+			b.Span("class", "active-label").T(label),
+		)
+	} else {
+		b.Div("id", "active-camera", "class", "active-camera disconnected").R(
+			b.Span("class", "active-label").T("No camera connected"),
+		)
+	}
 	return b
 }
 
@@ -542,6 +565,77 @@ h2 {
 }
 .connect-btn:active   { background: #ea6b0a; }
 .connect-btn:disabled { background: #7a2030; cursor: not-allowed; }
+
+/* ---- Active camera indicator above D-pad ---- */
+.active-camera {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	padding: 10px 16px;
+	border-radius: 8px;
+	margin-bottom: 16px;
+	font-size: 1rem;
+	font-weight: 600;
+	text-align: center;
+}
+.active-camera.connected {
+	background: #0d2b0d;
+	border: 1px solid #22c55e;
+	color: #4ade80;
+}
+.active-camera.disconnected {
+	background: #2a1a00;
+	border: 1px solid #7a5020;
+	color: #a07030;
+}
+.active-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: #4ade80;
+	/* Pulsing animation draws attention to the live indicator */
+	animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.4; }
+}
+
+/* ---- Toast notifications ---- */
+.toast-container {
+	position: fixed;
+	top: 16px;
+	right: 16px;
+	z-index: 1000;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	pointer-events: none;
+}
+.toast {
+	padding: 10px 16px;
+	border-radius: 8px;
+	font-size: 0.85rem;
+	font-weight: 500;
+	pointer-events: auto;
+	animation: toast-in 0.25s ease-out;
+	max-width: 320px;
+}
+.toast.error {
+	background: #3d1a00;
+	color: #f97316;
+	border: 1px solid #f97316;
+}
+.toast.success {
+	background: #0f3d0f;
+	color: #4caf50;
+	border: 1px solid #4caf50;
+}
+@keyframes toast-in {
+	from { opacity: 0; transform: translateX(20px); }
+	to   { opacity: 1; transform: translateX(0); }
+}
 `
 }
 
@@ -549,13 +643,36 @@ h2 {
 // wheel-based zooming (with debounced stop), and settings/preset AJAX calls.
 func jsScript() string {
 	return `
-// ---- Movement ----
-function sendMove(dir) {
-	fetch('/api/move', {
+// ---- Toast notifications ----
+// Shows a brief, auto-dismissing message in the top-right corner.
+// type: "error" (orange) or "success" (green).
+function showToast(msg, type) {
+	let container = document.getElementById('toast-container');
+	let toast = document.createElement('div');
+	toast.className = 'toast ' + (type || 'error');
+	toast.textContent = msg;
+	container.appendChild(toast);
+	setTimeout(function() { toast.remove(); }, 3000);
+}
+
+// Shared fetch helper — posts form data, parses JSON, and surfaces errors via toast.
+function postJSON(url, body) {
+	return fetch(url, {
 		method: 'POST',
 		headers: {'Content-Type':'application/x-www-form-urlencoded'},
-		body: 'direction=' + dir
-	});
+		body: body
+	})
+	.then(function(r) { return r.json(); })
+	.then(function(data) {
+		if (data.error) { showToast(data.error, 'error'); }
+		return data;
+	})
+	.catch(function() { showToast('Request failed — network error', 'error'); });
+}
+
+// ---- Movement ----
+function sendMove(dir) {
+	postJSON('/api/move', 'direction=' + dir);
 }
 
 // ---- Zoom via scroll wheel ----
@@ -576,47 +693,27 @@ document.addEventListener('wheel', function(e) {
 	zoomLevel = Math.min(100, Math.max(0, zoomLevel + delta));
 	document.getElementById('zoom-indicator').style.width = zoomLevel + '%';
 
-	fetch('/api/zoom', {
-		method: 'POST',
-		headers: {'Content-Type':'application/x-www-form-urlencoded'},
-		body: 'action=' + action + '&speed=' + speed
-	});
+	postJSON('/api/zoom', 'action=' + action + '&speed=' + speed);
 
 	// Debounce: stop zooming 200ms after last scroll event
 	clearTimeout(zoomTimer);
 	zoomTimer = setTimeout(function() {
-		fetch('/api/zoom', {
-			method: 'POST',
-			headers: {'Content-Type':'application/x-www-form-urlencoded'},
-			body: 'action=stop'
-		});
+		postJSON('/api/zoom', 'action=stop');
 	}, 200);
 }, {passive: false});
 
 // ---- Presets ----
 function presetRecall(num) {
-	fetch('/api/preset/recall', {
-		method: 'POST',
-		headers: {'Content-Type':'application/x-www-form-urlencoded'},
-		body: 'num=' + num
-	});
+	postJSON('/api/preset/recall', 'num=' + num);
 }
 
 function presetSet(num) {
 	if (!confirm('Save current camera position to this preset?')) return;
-	fetch('/api/preset/set', {
-		method: 'POST',
-		headers: {'Content-Type':'application/x-www-form-urlencoded'},
-		body: 'num=' + num
-	});
+	postJSON('/api/preset/set', 'num=' + num);
 }
 
 function saveLabel(num, label) {
-	fetch('/api/preset/label', {
-		method: 'POST',
-		headers: {'Content-Type':'application/x-www-form-urlencoded'},
-		body: 'num=' + num + '&label=' + encodeURIComponent(label)
-	});
+	postJSON('/api/preset/label', 'num=' + num + '&label=' + encodeURIComponent(label));
 }
 
 // ---- Camera management ----
@@ -632,11 +729,74 @@ function loadCamera(label, ip, port) {
 // Remove a saved camera from the list (stop propagation so the card click doesn't fire).
 function removeCamera(label, event) {
 	event.stopPropagation();
-	fetch('/api/camera/remove', {
-		method: 'POST',
-		headers: {'Content-Type':'application/x-www-form-urlencoded'},
-		body: 'label=' + encodeURIComponent(label)
-	}).then(() => location.reload());
+	postJSON('/api/camera/remove', 'label=' + encodeURIComponent(label))
+	.then(function() { location.reload(); });
+}
+
+// ---- Dynamic UI updates ----
+// Updates the status badge, active camera indicator, and saved cameras list
+// without a full page reload — avoids scroll-position loss and flash.
+
+function updateStatus(connected, label, ip, port) {
+	// Update the top status badge
+	let el = document.getElementById('conn-status');
+	if (connected) {
+		let displayName = label || ip;
+		el.className = 'status connected';
+		el.textContent = 'Connected \u2014 ' + displayName + ' (' + ip + ':' + port + ')';
+	} else {
+		el.className = 'status disconnected';
+		el.textContent = 'Disconnected';
+	}
+
+	// Update the active camera indicator above the D-pad
+	let active = document.getElementById('active-camera');
+	if (connected) {
+		active.className = 'active-camera connected';
+		active.innerHTML = '<span class="active-dot"></span><span class="active-label">' +
+			(label || ip) + '</span>';
+	} else {
+		active.className = 'active-camera disconnected';
+		active.innerHTML = '<span class="active-label">No camera connected</span>';
+	}
+}
+
+// Rebuilds the saved cameras sidebar from the JSON array returned by the server.
+// Highlights the currently connected camera with the "active" class.
+function updateCameraList(cameras, activeIP, activePort, isConnected) {
+	let container = document.querySelector('.saved-cameras');
+	// Create container if it does not exist yet (first camera being saved)
+	if (!container) {
+		let settingsDiv = document.querySelector('.settings');
+		if (!settingsDiv) return;
+		container = document.createElement('div');
+		container.className = 'saved-cameras';
+		// Insert before the first settings-row (the form fields)
+		let firstRow = settingsDiv.querySelector('.settings-row');
+		settingsDiv.insertBefore(container, firstRow);
+	}
+
+	if (!cameras || cameras.length === 0) {
+		container.remove();
+		return;
+	}
+
+	let html = '';
+	for (let cam of cameras) {
+		let isActive = isConnected && cam.ip === activeIP && cam.port === activePort;
+		let cls = isActive ? 'camera-item active' : 'camera-item';
+		let escapedLabel = cam.label.replace(/"/g, '&quot;');
+		html += '<div class="' + cls + '" onclick="loadCamera(\'' +
+			escapedLabel.replace(/'/g, "\\'") + "','" + cam.ip + "','" + cam.port + "')\">" +
+			'<div class="camera-item-info">' +
+			'<span class="camera-name">' + cam.label + '</span>' +
+			'<span class="camera-addr">' + cam.ip + ':' + cam.port + '</span>' +
+			'</div>' +
+			'<button class="camera-remove" onclick="removeCamera(\'' +
+			escapedLabel.replace(/'/g, "\\'") + "',event)\">×</button>" +
+			'</div>';
+	}
+	container.innerHTML = html;
 }
 
 // ---- Settings ----
@@ -655,22 +815,25 @@ function saveSettings() {
 		      '&ip='   + encodeURIComponent(ip) +
 		      '&port=' + port
 	})
-	.then(r => r.json())
-	.then(data => {
+	.then(function(r) { return r.json(); })
+	.then(function(data) {
+		btn.disabled = false;
 		if (data.connected) {
-			// Reload so the saved-cameras list refreshes with the new entry.
-			location.reload();
+			btn.textContent = 'Connected';
+			updateStatus(true, data.label, data.ip, data.port);
+			updateCameraList(data.cameras, data.ip, data.port, true);
+			showToast('Connected to ' + (data.label || data.ip), 'success');
 		} else {
-			let el = document.getElementById('conn-status');
-			el.className = 'status disconnected';
-			el.textContent = 'Connection failed: ' + (data.error || 'unknown');
 			btn.textContent = 'Connect';
-			btn.disabled = false;
+			updateStatus(false);
+			updateCameraList(data.cameras, '', 0, false);
+			showToast('Connection failed: ' + (data.error || 'unknown'), 'error');
 		}
 	})
-	.catch(() => {
+	.catch(function() {
 		btn.textContent = 'Connect';
 		btn.disabled = false;
+		showToast('Request failed — network error', 'error');
 	});
 }
 `
