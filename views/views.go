@@ -127,6 +127,7 @@ func renderActiveCamera(b *element.Builder, s Settings) *element.Builder {
 func renderDPad(b *element.Builder) *element.Builder {
 	b.DivClass("section").R(
 		b.H2().T("Pan / Tilt"),
+		b.PClass("dpad-hint").T("Press and hold for larger movements"),
 		b.DivClass("dpad").R(
 			// Row 1
 			b.DivClass("dpad-cell empty").R(),
@@ -173,8 +174,15 @@ func renderPresets(b *element.Builder, prs []presets.Preset) *element.Builder {
 		b.DivClass("preset-grid").R(
 			b.Wrap(func() {
 				for _, p := range prs {
+					// Presets with user-assigned labels get a highlight color;
+					// default "Preset N" labels are dimmed to visually separate
+					// configured slots from empty ones.
+					labelClass := "preset-label"
+					if p.Label != fmt.Sprintf("Preset %d", p.Number+1) {
+						labelClass = "preset-label set"
+					}
 					b.DivClass("preset-card").R(
-						b.Input("type", "text", "class", "preset-label",
+						b.Input("type", "text", "class", labelClass,
 							"id", fmt.Sprintf("preset-label-%d", p.Number),
 							"value", p.Label,
 							"onchange", fmt.Sprintf("saveLabel(%d, this.value)", p.Number),
@@ -379,7 +387,7 @@ h2 {
 }
 
 /* ---- Zoom ---- */
-.zoom-hint {
+.dpad-hint, .zoom-hint {
 	color: #666;
 	font-size: 0.85rem;
 	margin-bottom: 8px;
@@ -421,11 +429,16 @@ h2 {
 	width: 100%;
 	background: #1a1a2e;
 	border: 1px solid #0f3460;
-	color: #e0e0e0;
+	color: #666;
 	padding: 6px 8px;
 	border-radius: 4px;
 	font-size: 0.85rem;
 	text-align: center;
+}
+
+/* Presets with user-assigned labels stand out in green-yellow */
+.preset-label.set {
+	color: #a3e635;
 }
 
 .preset-actions {
@@ -708,7 +721,11 @@ function presetRecall(num) {
 }
 
 function presetSet(num) {
-	if (!confirm('Save current camera position to this preset?')) return;
+	// Include the preset's label in the confirmation so the operator
+	// knows exactly which slot they're overwriting.
+	let labelEl = document.getElementById('preset-label-' + num);
+	let name = (labelEl && labelEl.value) ? '"' + labelEl.value + '"' : 'Preset ' + (num + 1);
+	if (!confirm('Save current camera position to ' + name + '?')) return;
 	postJSON('/api/preset/set', 'num=' + num);
 }
 
