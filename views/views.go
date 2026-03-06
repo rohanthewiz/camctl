@@ -56,6 +56,7 @@ func RenderPage(data PageData) string {
 						// Active camera indicator — prominently shows which camera is under control
 						renderActiveCamera(b, data.Settings),
 						renderDPad(b),
+						renderSpeedControls(b),
 
 						// Zoom indicator
 						b.DivClass("section").R(
@@ -146,8 +147,8 @@ func renderDPad(b *element.Builder) *element.Builder {
 	return b
 }
 
-// dpadButton creates a single D-pad button that sends a move command on press
-// and a stop command on release. Home is a one-shot command (no stop needed).
+// dpadButton creates a single D-pad button that starts ramped movement on press
+// and stops on release. Home is a one-shot command (no ramping needed).
 func dpadButton(b *element.Builder, direction, label, id string) *element.Builder {
 	if direction == "home" {
 		b.Button("id", id, "class", "dpad-cell dpad-btn",
@@ -155,14 +156,48 @@ func dpadButton(b *element.Builder, direction, label, id string) *element.Builde
 			"ontouchstart", fmt.Sprintf("sendMove('%s'); event.preventDefault()", direction),
 		).T(label)
 	} else {
+		// Directional buttons use startMove/stopMove for speed curve ramping.
+		// startMove begins at the curve's initial speed and ramps over time;
+		// stopMove clears the ramp interval and sends a VISCA stop command.
 		b.Button("id", id, "class", "dpad-cell dpad-btn",
-			"onmousedown", fmt.Sprintf("sendMove('%s')", direction),
-			"onmouseup", "sendMove('stop')",
-			"onmouseleave", "sendMove('stop')",
-			"ontouchstart", fmt.Sprintf("sendMove('%s'); event.preventDefault()", direction),
-			"ontouchend", "sendMove('stop')",
+			"onmousedown", fmt.Sprintf("startMove('%s')", direction),
+			"onmouseup", "stopMove()",
+			"onmouseleave", "stopMove()",
+			"ontouchstart", fmt.Sprintf("startMove('%s'); event.preventDefault()", direction),
+			"ontouchend", "stopMove()",
 		).T(label)
 	}
+	return b
+}
+
+// renderSpeedControls creates the speed curve selector and max-speed slider.
+// Placed below the D-pad so the operator can adjust how hold duration
+// maps to movement speed.
+//
+//	Curve selector: three mutually-exclusive buttons (Constant / Linear / Expo)
+//	Speed slider:   sets the target max speed (1–24) for the selected curve
+func renderSpeedControls(b *element.Builder) *element.Builder {
+	b.DivClass("section speed-controls").R(
+		// Curve selector — three toggle buttons in a horizontal group
+		b.DivClass("curve-selector").R(
+			b.Button("id", "curve-constant", "class", "curve-btn active",
+				"onclick", "setCurve('constant')").T("Constant"),
+			b.Button("id", "curve-linear", "class", "curve-btn",
+				"onclick", "setCurve('linear')").T("Linear"),
+			b.Button("id", "curve-expo", "class", "curve-btn",
+				"onclick", "setCurve('expo')").T("Expo"),
+		),
+
+		// Speed slider with numeric readout
+		b.DivClass("speed-slider-row").R(
+			b.SpanClass("speed-label").T("Speed"),
+			b.Input("type", "range", "id", "speed-slider",
+				"min", "1", "max", "24", "value", "8",
+				"class", "speed-slider",
+				"oninput", "updateSpeedDisplay(this.value)").R(),
+			b.Span("id", "speed-value", "class", "speed-value").T("8"),
+		),
+	)
 	return b
 }
 
@@ -384,6 +419,84 @@ h2 {
 #btn-home {
 	background: #0f3460;
 	border-color: #f97316;
+}
+
+/* ---- Speed curve controls ---- */
+.speed-controls {
+	margin-bottom: 8px;
+}
+
+/* Curve selector: horizontal toggle-button group */
+.curve-selector {
+	display: flex;
+	gap: 4px;
+	margin-bottom: 10px;
+}
+.curve-btn {
+	flex: 1;
+	padding: 6px 0;
+	background: #16213e;
+	color: #888;
+	border: 1px solid #0f3460;
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 0.8rem;
+	font-weight: 600;
+	transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.curve-btn:hover {
+	color: #bbb;
+	border-color: #1a4a80;
+}
+.curve-btn.active {
+	background: #f97316;
+	color: #fff;
+	border-color: #f97316;
+}
+
+/* Speed slider row: label — range input — numeric readout */
+.speed-slider-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.speed-label {
+	font-size: 0.85rem;
+	color: #aaa;
+	min-width: 40px;
+}
+.speed-slider {
+	flex: 1;
+	-webkit-appearance: none;
+	appearance: none;
+	height: 6px;
+	background: #16213e;
+	border-radius: 3px;
+	outline: none;
+}
+.speed-slider::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	background: #f97316;
+	cursor: pointer;
+	border: 2px solid #1a1a2e;
+}
+.speed-slider::-moz-range-thumb {
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	background: #f97316;
+	cursor: pointer;
+	border: 2px solid #1a1a2e;
+}
+.speed-value {
+	font-size: 0.85rem;
+	color: #f97316;
+	font-weight: 700;
+	min-width: 24px;
+	text-align: center;
 }
 
 /* ---- Zoom ---- */
@@ -683,7 +796,105 @@ function postJSON(url, body) {
 	.catch(function() { showToast('Request failed — network error', 'error'); });
 }
 
-// ---- Movement ----
+// ---- Movement & speed curve state ----
+// currentCurve: determines how speed changes over time while a D-pad button is held.
+// maxSpeed: target speed set by the slider (1–24).
+let currentCurve = 'constant';
+let maxSpeed = 8;
+let moveInterval = null;   // setInterval handle for ramping
+let moveStartTime = 0;     // timestamp when button was pressed
+let currentDirection = '';  // direction currently being held
+
+// rampDurationMs: total time (ms) to ramp from 1 to maxSpeed for non-constant curves
+const rampDurationMs = 2000;
+// moveIntervalMs: how often (ms) we re-send the move command with updated speed
+const moveIntervalMs = 100;
+
+// setCurve switches the active speed curve and updates the button group styling.
+function setCurve(curve) {
+	currentCurve = curve;
+	document.querySelectorAll('.curve-btn').forEach(function(btn) {
+		btn.classList.remove('active');
+	});
+	document.getElementById('curve-' + curve).classList.add('active');
+}
+
+// updateSpeedDisplay updates the numeric readout next to the slider.
+function updateSpeedDisplay(val) {
+	maxSpeed = parseInt(val);
+	document.getElementById('speed-value').textContent = val;
+}
+
+// computeSpeed calculates the current speed based on elapsed hold time and curve type.
+// Returns an integer between 1 and maxSpeed.
+//
+//   constant:  always maxSpeed (no ramping)
+//   linear:    linearly interpolates from 1 to maxSpeed over rampDurationMs
+//   expo:      cubic easing (t^3) — slow start, dramatic acceleration
+function computeSpeed(elapsedMs) {
+	if (currentCurve === 'constant') {
+		return maxSpeed;
+	}
+	// t is normalized progress [0.0, 1.0]
+	let t = Math.min(1.0, elapsedMs / rampDurationMs);
+
+	if (currentCurve === 'linear') {
+		return Math.max(1, Math.round(1 + (maxSpeed - 1) * t));
+	}
+
+	// Expo: cubic easing — t^3 gives a slow-start, fast-finish feel
+	let curved = t * t * t;
+	return Math.max(1, Math.round(1 + (maxSpeed - 1) * curved));
+}
+
+// startMove begins a D-pad hold: sends the initial move command, then for
+// non-constant curves starts a periodic interval that re-sends with increasing speed.
+function startMove(dir) {
+	if (moveInterval) stopMove();
+
+	currentDirection = dir;
+	moveStartTime = Date.now();
+
+	// Send the first command immediately at the curve's initial speed
+	sendMoveWithSpeed(dir, computeSpeed(0));
+
+	// For constant curve, one command is enough — VISCA keeps moving until stop
+	if (currentCurve === 'constant') return;
+
+	// For ramping curves, periodically re-send with increasing speed
+	moveInterval = setInterval(function() {
+		let elapsed = Date.now() - moveStartTime;
+		let speed = computeSpeed(elapsed);
+		sendMoveWithSpeed(currentDirection, speed);
+
+		// Once we've reached max speed, stop re-sending (camera holds the speed)
+		if (elapsed >= rampDurationMs) {
+			clearInterval(moveInterval);
+			moveInterval = null;
+		}
+	}, moveIntervalMs);
+}
+
+// stopMove clears the ramp interval and sends a stop command to the camera.
+function stopMove() {
+	if (moveInterval) {
+		clearInterval(moveInterval);
+		moveInterval = null;
+	}
+	currentDirection = '';
+	sendMove('stop');
+}
+
+// sendMoveWithSpeed sends a move command with explicit speed parameters.
+// Pan speed clamped to 1–24 (VISCA max 0x18), tilt speed to 1–23 (0x17).
+function sendMoveWithSpeed(dir, speed) {
+	let panSpeed = Math.min(24, Math.max(1, speed));
+	let tiltSpeed = Math.min(23, Math.max(1, speed));
+	postJSON('/api/move', 'direction=' + dir +
+		'&panSpeed=' + panSpeed + '&tiltSpeed=' + tiltSpeed);
+}
+
+// sendMove sends a direction-only command (used for stop and home).
 function sendMove(dir) {
 	postJSON('/api/move', 'direction=' + dir);
 }

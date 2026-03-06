@@ -77,8 +77,25 @@ func (a *App) handleIndex(c rweb.Context) error {
 
 // handleMove processes pan/tilt/home/stop commands.
 // Expects form param "direction": left, right, up, down, home, stop.
+// Optional "panSpeed" (1–24) and "tiltSpeed" (1–23) override the defaults,
+// enabling client-side speed curves to ramp movement over time.
 func (a *App) handleMove(c rweb.Context) error {
 	direction := c.Request().FormValue("direction")
+
+	// Parse optional speed overrides — the JS ramping logic sends these
+	// with increasing values while a D-pad button is held down.
+	panSpeed := defaultPanSpeed
+	tiltSpeed := defaultTiltSpeed
+	if ps := c.Request().FormValue("panSpeed"); ps != "" {
+		if v, err := strconv.Atoi(ps); err == nil && v >= 1 && v <= 0x18 {
+			panSpeed = byte(v)
+		}
+	}
+	if ts := c.Request().FormValue("tiltSpeed"); ts != "" {
+		if v, err := strconv.Atoi(ts); err == nil && v >= 1 && v <= 0x17 {
+			tiltSpeed = byte(v)
+		}
+	}
 
 	a.mu.RLock()
 	cam := a.Camera
@@ -91,13 +108,13 @@ func (a *App) handleMove(c rweb.Context) error {
 	var err error
 	switch direction {
 	case "left":
-		err = cam.PanTilt(visca.DirLeft, visca.DirStop, defaultPanSpeed, defaultTiltSpeed)
+		err = cam.PanTilt(visca.DirLeft, visca.DirStop, panSpeed, tiltSpeed)
 	case "right":
-		err = cam.PanTilt(visca.DirRight, visca.DirStop, defaultPanSpeed, defaultTiltSpeed)
+		err = cam.PanTilt(visca.DirRight, visca.DirStop, panSpeed, tiltSpeed)
 	case "up":
-		err = cam.PanTilt(visca.DirStop, visca.DirUp, defaultPanSpeed, defaultTiltSpeed)
+		err = cam.PanTilt(visca.DirStop, visca.DirUp, panSpeed, tiltSpeed)
 	case "down":
-		err = cam.PanTilt(visca.DirStop, visca.DirDown, defaultPanSpeed, defaultTiltSpeed)
+		err = cam.PanTilt(visca.DirStop, visca.DirDown, panSpeed, tiltSpeed)
 	case "home":
 		err = cam.Home()
 	case "stop":
