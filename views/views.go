@@ -68,10 +68,10 @@ func RenderPage(data PageData) string {
 						),
 					),
 
-					// Right column — presets and camera settings
+					// Right column — cameras (primary), then presets
 					b.DivClass("col").R(
+						renderCameras(b, data.Settings, data.Cameras),
 						renderPresets(b, data.Presets),
-						renderSettings(b, data.Settings, data.Cameras),
 					),
 				),
 			),
@@ -238,19 +238,23 @@ func renderPresets(b *element.Builder, prs []presets.Preset) *element.Builder {
 	return b
 }
 
-// renderSettings creates the camera connection form with a saved-cameras list.
-func renderSettings(b *element.Builder, s Settings, cams []CameraItem) *element.Builder {
-	portStr := fmt.Sprintf("%d", s.CameraPort)
-	if s.CameraPort == 0 {
-		portStr = "52381"
+// renderCameras creates the camera management section: saved cameras list
+// at the top for one-click switching, with a collapsible "Add Camera" form below.
+// When no cameras are saved, the form is shown by default.
+func renderCameras(b *element.Builder, s Settings, cams []CameraItem) *element.Builder {
+	hasCameras := len(cams) > 0
+	// Show the add form by default when there are no saved cameras
+	formClass := "add-camera-form"
+	if !hasCameras {
+		formClass = "add-camera-form open"
 	}
 
-	b.DivClass("section settings").R(
-		b.H2().T("Camera Settings"),
+	b.DivClass("section cameras-section").R(
+		b.H2().T("Cameras"),
 
-		// Saved cameras list
+		// Saved cameras list — one-click to connect
 		b.Wrap(func() {
-			if len(cams) > 0 {
+			if hasCameras {
 				b.DivClass("saved-cameras").R(
 					b.Wrap(func() {
 						for _, cam := range cams {
@@ -260,41 +264,61 @@ func renderSettings(b *element.Builder, s Settings, cams []CameraItem) *element.
 								cardClass = "camera-item active"
 							}
 							portStr := fmt.Sprintf("%d", cam.Port)
-							onclick := fmt.Sprintf("loadCamera(%q,%q,%q)", cam.Label, cam.IP, portStr)
+							onclick := fmt.Sprintf("connectCamera(%q,%q,%q)", cam.Label, cam.IP, portStr)
 							removeClick := fmt.Sprintf("removeCamera(%q,event)", cam.Label)
 							b.Div("class", cardClass, "onclick", onclick).R(
 								b.DivClass("camera-item-info").R(
 									b.Span("class", "camera-name").T(cam.Label),
 									b.Span("class", "camera-addr").T(fmt.Sprintf("%s:%d", cam.IP, cam.Port)),
 								),
-								b.Button("class", "camera-remove", "onclick", removeClick).T("×"),
+								b.Button("class", "camera-remove", "onclick", removeClick).T("\u00d7"),
 							)
 						}
 					}),
 				)
+			} else {
+				b.PClass("no-cameras-hint").T("No cameras saved yet. Add one to get started.")
 			}
 		}),
 
-		// Form fields
-		b.DivClass("settings-row").R(
-			b.Label("for", "camera-label").T("Label"),
-			b.Input("type", "text", "id", "camera-label",
-				"value", s.CameraLabel, "placeholder", "Camera 1").R(),
-		),
-		b.DivClass("settings-row").R(
-			b.Label("for", "camera-ip").T("IP Address"),
-			b.Input("type", "text", "id", "camera-ip",
-				"value", s.CameraIP, "placeholder", "192.168.1.100").R(),
-		),
-		b.DivClass("settings-row").R(
-			b.Label("for", "camera-port").T("Port"),
-			b.Input("type", "number", "id", "camera-port",
-				"value", portStr, "placeholder", "52381").R(),
-		),
-		b.DivClass("settings-row").R(
-			b.Button("id", "connect-btn", "class", "connect-btn",
-				"onclick", "saveSettings()",
-			).T("Connect"),
+		// Toggle button to show/hide the add-camera form
+		b.Wrap(func() {
+			if hasCameras {
+				b.Button("class", "add-camera-toggle", "onclick", "toggleAddForm()").R(
+					b.Span("class", "add-camera-toggle-icon").T("+"),
+					b.Span().T("Add Camera"),
+				)
+			}
+		}),
+
+		// Add camera form — collapsible
+		b.Div("id", "add-camera-form", "class", formClass).R(
+			b.DivClass("settings-row").R(
+				b.Label("for", "camera-label").T("Name"),
+				b.Input("type", "text", "id", "camera-label",
+					"placeholder", "e.g. Stage Left").R(),
+			),
+			b.DivClass("settings-row").R(
+				b.Label("for", "camera-ip").T("IP Address"),
+				b.Input("type", "text", "id", "camera-ip",
+					"placeholder", "192.168.1.100").R(),
+			),
+			// Port row — hidden by default, toggled via "Advanced" link
+			b.DivClass("advanced-toggle").R(
+				b.A("href", "#", "onclick", "toggleAdvanced(event)").T("Advanced settings"),
+			),
+			b.Div("id", "advanced-fields", "class", "advanced-fields").R(
+				b.DivClass("settings-row").R(
+					b.Label("for", "camera-port").T("Port"),
+					b.Input("type", "number", "id", "camera-port",
+						"value", "52381", "placeholder", "52381").R(),
+				),
+			),
+			b.DivClass("settings-row").R(
+				b.Button("id", "connect-btn", "class", "connect-btn",
+					"onclick", "addCamera()",
+				).T("Add & Connect"),
+			),
 		),
 	)
 	return b
@@ -589,10 +613,16 @@ h2 {
 .preset-btn.save:hover  { color: #888; border-color: #444; }
 .preset-btn.save:active { background: #2a2740; color: #aaa; }
 
-/* ---- Settings ---- */
-.settings {
-	border-top: 1px solid #333;
-	padding-top: 20px;
+/* ---- Cameras section ---- */
+.cameras-section {
+	margin-bottom: 24px;
+}
+
+.no-cameras-hint {
+	color: #666;
+	font-size: 0.85rem;
+	margin-bottom: 12px;
+	font-style: italic;
 }
 
 /* Saved cameras list */
@@ -600,7 +630,7 @@ h2 {
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
-	margin-bottom: 14px;
+	margin-bottom: 10px;
 }
 
 .camera-item {
@@ -611,7 +641,7 @@ h2 {
 	background: #16213e;
 	border: 1px solid #0f3460;
 	border-radius: 6px;
-	padding: 8px 10px;
+	padding: 10px 12px;
 	cursor: pointer;
 	transition: border-color 0.15s, background 0.15s;
 }
@@ -654,6 +684,61 @@ h2 {
 	line-height: 1;
 }
 .camera-remove:hover { color: #f97316; }
+
+/* Add camera toggle button */
+.add-camera-toggle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	background: transparent;
+	border: 1px dashed #333;
+	border-radius: 6px;
+	color: #888;
+	padding: 8px 12px;
+	cursor: pointer;
+	font-size: 0.85rem;
+	width: 100%;
+	transition: color 0.15s, border-color 0.15s;
+	margin-bottom: 10px;
+}
+.add-camera-toggle:hover { color: #f97316; border-color: #f97316; }
+.add-camera-toggle-icon {
+	font-size: 1.1rem;
+	font-weight: 700;
+	line-height: 1;
+}
+
+/* Collapsible add-camera form */
+.add-camera-form {
+	max-height: 0;
+	overflow: hidden;
+	transition: max-height 0.25s ease-out, opacity 0.2s;
+	opacity: 0;
+}
+.add-camera-form.open {
+	max-height: 400px;
+	opacity: 1;
+}
+
+/* Advanced settings toggle */
+.advanced-toggle {
+	margin-bottom: 10px;
+}
+.advanced-toggle a {
+	color: #555;
+	font-size: 0.8rem;
+	text-decoration: none;
+}
+.advanced-toggle a:hover { color: #888; }
+
+.advanced-fields {
+	max-height: 0;
+	overflow: hidden;
+	transition: max-height 0.2s ease-out;
+}
+.advanced-fields.open {
+	max-height: 80px;
+}
 
 .settings-row {
 	display: flex;
@@ -946,12 +1031,47 @@ function saveLabel(num, label) {
 
 // ---- Camera management ----
 
-// Load a saved camera into the form and connect immediately.
-function loadCamera(label, ip, port) {
-	document.getElementById('camera-label').value = label;
-	document.getElementById('camera-ip').value = ip;
-	document.getElementById('camera-port').value = port;
-	saveSettings();
+// Toggle the add-camera form open/closed.
+function toggleAddForm() {
+	let form = document.getElementById('add-camera-form');
+	form.classList.toggle('open');
+}
+
+// Toggle advanced settings (port field) visibility.
+function toggleAdvanced(event) {
+	event.preventDefault();
+	let fields = document.getElementById('advanced-fields');
+	fields.classList.toggle('open');
+}
+
+// Connect to a saved camera — one click, no form needed.
+function connectCamera(label, ip, port) {
+	// Highlight the clicked card immediately for responsiveness
+	document.querySelectorAll('.camera-item').forEach(function(el) {
+		el.classList.remove('active');
+	});
+
+	doConnect(label, ip, port);
+}
+
+// Add a new camera from the form and connect to it.
+function addCamera() {
+	let label = document.getElementById('camera-label').value.trim();
+	let ip    = document.getElementById('camera-ip').value.trim();
+	let port  = document.getElementById('camera-port').value;
+
+	if (!label) {
+		showToast('Please enter a name for this camera', 'error');
+		document.getElementById('camera-label').focus();
+		return;
+	}
+	if (!ip) {
+		showToast('Please enter an IP address', 'error');
+		document.getElementById('camera-ip').focus();
+		return;
+	}
+
+	doConnect(label, ip, port);
 }
 
 // Remove a saved camera from the list (stop propagation so the card click doesn't fire).
@@ -961,12 +1081,59 @@ function removeCamera(label, event) {
 	.then(function() { location.reload(); });
 }
 
+// Shared connection logic used by both connectCamera and addCamera.
+function doConnect(label, ip, port) {
+	let btn = document.getElementById('connect-btn');
+	if (btn) {
+		btn.textContent = 'Connecting...';
+		btn.disabled = true;
+	}
+
+	fetch('/api/settings', {
+		method: 'POST',
+		headers: {'Content-Type':'application/x-www-form-urlencoded'},
+		body: 'label=' + encodeURIComponent(label) +
+		      '&ip='   + encodeURIComponent(ip) +
+		      '&port=' + port
+	})
+	.then(function(r) { return r.json(); })
+	.then(function(data) {
+		if (btn) {
+			btn.disabled = false;
+			btn.textContent = 'Add & Connect';
+		}
+		if (data.connected) {
+			updateStatus(true, data.label, data.ip, data.port);
+			updateCameraList(data.cameras, data.ip, data.port, true);
+			showToast('Connected to ' + (data.label || data.ip), 'success');
+			// Clear the add form and collapse it after successful add
+			if (document.getElementById('camera-label')) {
+				document.getElementById('camera-label').value = '';
+				document.getElementById('camera-ip').value = '';
+				document.getElementById('camera-port').value = '52381';
+			}
+			let form = document.getElementById('add-camera-form');
+			if (form && data.cameras && data.cameras.length > 0) {
+				form.classList.remove('open');
+			}
+		} else {
+			updateStatus(false);
+			updateCameraList(data.cameras, '', 0, false);
+			showToast('Connection failed: ' + (data.error || 'unknown'), 'error');
+		}
+	})
+	.catch(function() {
+		if (btn) {
+			btn.textContent = 'Add & Connect';
+			btn.disabled = false;
+		}
+		showToast('Request failed — network error', 'error');
+	});
+}
+
 // ---- Dynamic UI updates ----
-// Updates the status badge, active camera indicator, and saved cameras list
-// without a full page reload — avoids scroll-position loss and flash.
 
 function updateStatus(connected, label, ip, port) {
-	// Update the top status badge
 	let el = document.getElementById('conn-status');
 	if (connected) {
 		let displayName = label || ip;
@@ -977,7 +1144,6 @@ function updateStatus(connected, label, ip, port) {
 		el.textContent = 'Disconnected';
 	}
 
-	// Update the active camera indicator above the D-pad
 	let active = document.getElementById('active-camera');
 	if (connected) {
 		active.className = 'active-camera connected';
@@ -989,24 +1155,53 @@ function updateStatus(connected, label, ip, port) {
 	}
 }
 
-// Rebuilds the saved cameras sidebar from the JSON array returned by the server.
-// Highlights the currently connected camera with the "active" class.
+// Rebuilds the saved cameras list and shows/hides the "no cameras" hint and toggle button.
 function updateCameraList(cameras, activeIP, activePort, isConnected) {
-	let container = document.querySelector('.saved-cameras');
-	// Create container if it does not exist yet (first camera being saved)
-	if (!container) {
-		let settingsDiv = document.querySelector('.settings');
-		if (!settingsDiv) return;
-		container = document.createElement('div');
-		container.className = 'saved-cameras';
-		// Insert before the first settings-row (the form fields)
-		let firstRow = settingsDiv.querySelector('.settings-row');
-		settingsDiv.insertBefore(container, firstRow);
-	}
+	let section = document.querySelector('.cameras-section');
+	if (!section) return;
+
+	// Update or create saved-cameras container
+	let container = section.querySelector('.saved-cameras');
+	let hint = section.querySelector('.no-cameras-hint');
+	let toggle = section.querySelector('.add-camera-toggle');
 
 	if (!cameras || cameras.length === 0) {
-		container.remove();
+		if (container) container.remove();
+		// Show hint if not present
+		if (!hint) {
+			hint = document.createElement('p');
+			hint.className = 'no-cameras-hint';
+			hint.textContent = 'No cameras saved yet. Add one to get started.';
+			let h2 = section.querySelector('h2');
+			h2.insertAdjacentElement('afterend', hint);
+		}
+		// Remove toggle button when no cameras
+		if (toggle) toggle.remove();
+		// Open the add form
+		let form = document.getElementById('add-camera-form');
+		if (form) form.classList.add('open');
 		return;
+	}
+
+	// Remove hint if cameras exist
+	if (hint) hint.remove();
+
+	// Create container if needed
+	if (!container) {
+		container = document.createElement('div');
+		container.className = 'saved-cameras';
+		let h2 = section.querySelector('h2');
+		h2.insertAdjacentElement('afterend', container);
+	}
+
+	// Ensure toggle button exists
+	if (!toggle) {
+		toggle = document.createElement('button');
+		toggle.className = 'add-camera-toggle';
+		toggle.onclick = toggleAddForm;
+		toggle.innerHTML = '<span class="add-camera-toggle-icon">+</span><span>Add Camera</span>';
+		let form = document.getElementById('add-camera-form');
+		section.insertBefore(toggle, form);
 	}
 
 	let html = '';
@@ -1014,55 +1209,17 @@ function updateCameraList(cameras, activeIP, activePort, isConnected) {
 		let isActive = isConnected && cam.ip === activeIP && cam.port === activePort;
 		let cls = isActive ? 'camera-item active' : 'camera-item';
 		let escapedLabel = cam.label.replace(/"/g, '&quot;');
-		html += '<div class="' + cls + '" onclick="loadCamera(\'' +
+		html += '<div class="' + cls + '" onclick="connectCamera(\'' +
 			escapedLabel.replace(/'/g, "\\'") + "','" + cam.ip + "','" + cam.port + "')\">" +
 			'<div class="camera-item-info">' +
 			'<span class="camera-name">' + cam.label + '</span>' +
 			'<span class="camera-addr">' + cam.ip + ':' + cam.port + '</span>' +
 			'</div>' +
 			'<button class="camera-remove" onclick="removeCamera(\'' +
-			escapedLabel.replace(/'/g, "\\'") + "',event)\">×</button>" +
+			escapedLabel.replace(/'/g, "\\'") + "',event)\">\u00d7</button>" +
 			'</div>';
 	}
 	container.innerHTML = html;
-}
-
-// ---- Settings ----
-function saveSettings() {
-	let label = document.getElementById('camera-label').value.trim();
-	let ip    = document.getElementById('camera-ip').value.trim();
-	let port  = document.getElementById('camera-port').value;
-	let btn   = document.getElementById('connect-btn');
-	btn.textContent = 'Connecting...';
-	btn.disabled = true;
-
-	fetch('/api/settings', {
-		method: 'POST',
-		headers: {'Content-Type':'application/x-www-form-urlencoded'},
-		body: 'label=' + encodeURIComponent(label) +
-		      '&ip='   + encodeURIComponent(ip) +
-		      '&port=' + port
-	})
-	.then(function(r) { return r.json(); })
-	.then(function(data) {
-		btn.disabled = false;
-		if (data.connected) {
-			btn.textContent = 'Connected';
-			updateStatus(true, data.label, data.ip, data.port);
-			updateCameraList(data.cameras, data.ip, data.port, true);
-			showToast('Connected to ' + (data.label || data.ip), 'success');
-		} else {
-			btn.textContent = 'Connect';
-			updateStatus(false);
-			updateCameraList(data.cameras, '', 0, false);
-			showToast('Connection failed: ' + (data.error || 'unknown'), 'error');
-		}
-	})
-	.catch(function() {
-		btn.textContent = 'Connect';
-		btn.disabled = false;
-		showToast('Request failed — network error', 'error');
-	});
 }
 `
 }

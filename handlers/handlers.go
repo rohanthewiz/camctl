@@ -247,9 +247,10 @@ type settingsResponse struct {
 	Cameras   []cameraJSON `json:"cameras"`
 }
 
-// handleSettings updates the camera IP/port, saves it to the camera list (when a
-// label is provided), and attempts to connect.
-// Expects form params "label" (optional), "ip", and "port".
+// handleSettings connects to a camera and saves it to the camera list when a
+// label is provided. Used for both one-click saved-camera connections and
+// new camera additions from the add-camera form.
+// Expects form params "label" (required for saving), "ip", and "port".
 func (a *App) handleSettings(c rweb.Context) error {
 	label := c.Request().FormValue("label")
 	ip := c.Request().FormValue("ip")
