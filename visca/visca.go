@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Default VISCA-over-IP port used by most NDI PTZ cameras
@@ -41,9 +42,8 @@ func NewClient(host string, port int) *Client {
 	}
 }
 
-// Connect opens a UDP socket to the camera. VISCA-over-IP is
-// connectionless, but Go's Dial on UDP sets a default destination
-// so we can use Write() instead of WriteTo() on every send.
+// Connect opens a UDP socket to the camera and verifies it responds
+// by sending an IF_Clear command and waiting for an ACK.
 func (c *Client) Connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -53,8 +53,36 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("visca: dial %s: %w", c.addr, err)
 	}
 	c.conn = conn
-	c.connected = true
 	c.seqNum.Store(0) // reset sequence on new connection
+
+	// Verify the camera is reachable by sending IF_Clear and waiting for a reply.
+	// Without this check, UDP "connects" always succeed even if the camera is off.
+	ifClear := c.buildFrame([]byte{0x81, 0x01, 0x00, 0x01, 0xFF})
+	if err := conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		conn.Close()
+		return fmt.Errorf("visca: %w", err)
+	}
+	if _, err := conn.Write(ifClear); err != nil {
+		conn.Close()
+		return fmt.Errorf("visca: send IF_Clear to %s: %w", c.addr, err)
+	}
+
+	// Wait for any response — an ACK proves the camera is alive.
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		conn.Close()
+		return fmt.Errorf("visca: %w", err)
+	}
+	buf := make([]byte, 64)
+	if _, err := conn.Read(buf); err != nil {
+		conn.Close()
+		return fmt.Errorf("visca: no response from %s (camera may be offline)", c.addr)
+	}
+
+	// Clear deadlines for normal operation.
+	_ = conn.SetWriteDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{})
+
+	c.connected = true
 	return nil
 }
 

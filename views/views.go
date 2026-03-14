@@ -1,11 +1,22 @@
 package views
 
 import (
-	"camctl/presets"
+	"camctl/storage"
 	"fmt"
+	"strings"
 
 	"github.com/rohanthewiz/element"
 )
+
+// jsEscape escapes a string for safe use inside a single-quoted JS string literal.
+// The element builder does not HTML-escape attribute values, so we must avoid
+// double quotes (which would break onclick="..." attributes) and instead use
+// single-quoted JS strings with backslash-escaped single quotes.
+func jsEscape(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `'`, `\'`)
+	return s
+}
 
 // Settings holds the current camera connection state for rendering.
 type Settings struct {
@@ -25,7 +36,7 @@ type CameraItem struct {
 // PageData bundles everything the main page template needs.
 type PageData struct {
 	Settings Settings
-	Presets  []presets.Preset
+	Presets  []storage.Preset
 	Cameras  []CameraItem
 }
 
@@ -53,6 +64,8 @@ func RenderPage(data PageData) string {
 				b.DivClass("columns").R(
 					// Left column — movement controls
 					b.DivClass("col").R(
+						// NDI preview — shows live camera feed via WebSocket
+						renderPreview(b),
 						// Active camera indicator — prominently shows which camera is under control
 						renderActiveCamera(b, data.Settings),
 						renderDPad(b),
@@ -77,6 +90,29 @@ func RenderPage(data PageData) string {
 			),
 			// Toast container for error/status notifications
 			b.Div("id", "toast-container", "class", "toast-container").R(),
+			// Edit camera modal
+			b.Div("id", "edit-modal", "class", "modal-overlay", "onclick", "closeEditModal(event)").R(
+				b.DivClass("modal").R(
+					b.H2().T("Edit Camera"),
+					b.Input("type", "hidden", "id", "edit-old-label").R(),
+					b.DivClass("settings-row").R(
+						b.Label("for", "edit-label").T("Name"),
+						b.Input("type", "text", "id", "edit-label").R(),
+					),
+					b.DivClass("settings-row").R(
+						b.Label("for", "edit-ip").T("IP Address"),
+						b.Input("type", "text", "id", "edit-ip").R(),
+					),
+					b.DivClass("settings-row").R(
+						b.Label("for", "edit-port").T("Port"),
+						b.Input("type", "number", "id", "edit-port").R(),
+					),
+					b.DivClass("modal-actions").R(
+						b.Button("class", "modal-btn cancel", "onclick", "closeEditModal()").T("Cancel"),
+						b.Button("class", "modal-btn save", "onclick", "saveEditCamera()").T("Save"),
+					),
+				),
+			),
 			b.Script().T(jsScript()),
 		),
 	)
@@ -116,6 +152,15 @@ func renderActiveCamera(b *element.Builder, s Settings) *element.Builder {
 			b.Span("class", "active-label").T("No camera connected"),
 		)
 	}
+	return b
+}
+
+// renderPreview creates the NDI live preview box.
+func renderPreview(b *element.Builder) *element.Builder {
+	b.DivClass("preview-box").R(
+		b.Img("id", "preview-img", "alt", "").R(),
+		b.Div("id", "preview-no-signal", "class", "preview-no-signal").T("No Signal"),
+	)
 	return b
 }
 
@@ -203,7 +248,7 @@ func renderSpeedControls(b *element.Builder) *element.Builder {
 
 // renderPresets creates 6 presets in a 3-per-row grid.
 // Each preset card has an editable label, a green GO button, and a muted Save button.
-func renderPresets(b *element.Builder, prs []presets.Preset) *element.Builder {
+func renderPresets(b *element.Builder, prs []storage.Preset) *element.Builder {
 	b.DivClass("section").R(
 		b.H2().T("Presets"),
 		b.DivClass("preset-grid").R(
@@ -264,14 +309,22 @@ func renderCameras(b *element.Builder, s Settings, cams []CameraItem) *element.B
 								cardClass = "camera-item active"
 							}
 							portStr := fmt.Sprintf("%d", cam.Port)
-							onclick := fmt.Sprintf("connectCamera(%q,%q,%q)", cam.Label, cam.IP, portStr)
-							removeClick := fmt.Sprintf("removeCamera(%q,event)", cam.Label)
+							escLabel := jsEscape(cam.Label)
+							escIP := jsEscape(cam.IP)
+							onclick := fmt.Sprintf("connectCamera('%s','%s','%s')", escLabel, escIP, portStr)
+							reconnectClick := fmt.Sprintf("reconnectCamera('%s','%s','%s',event)", escLabel, escIP, portStr)
+							editClick := fmt.Sprintf("editCamera('%s','%s','%s',event)", escLabel, escIP, portStr)
+							removeClick := fmt.Sprintf("removeCamera('%s',event)", escLabel)
 							b.Div("class", cardClass, "onclick", onclick).R(
 								b.DivClass("camera-item-info").R(
 									b.Span("class", "camera-name").T(cam.Label),
 									b.Span("class", "camera-addr").T(fmt.Sprintf("%s:%d", cam.IP, cam.Port)),
 								),
-								b.Button("class", "camera-remove", "onclick", removeClick).T("\u00d7"),
+								b.DivClass("camera-actions").R(
+									b.Button("class", "camera-action-btn reconnect", "onclick", reconnectClick, "title", "Reconnect").T("\u21bb"),
+									b.Button("class", "camera-action-btn edit", "onclick", editClick, "title", "Edit").T("\u270e"),
+									b.Button("class", "camera-action-btn delete", "onclick", removeClick, "title", "Delete").T("\u00d7"),
+								),
 							)
 						}
 					}),
@@ -672,18 +725,80 @@ h2 {
 .camera-item.active .camera-name { color: #4caf50; }
 .camera-item.active .camera-addr { color: #2d7a2d; }
 
-.camera-remove {
+.camera-actions {
+	display: flex;
+	gap: 4px;
 	flex-shrink: 0;
+}
+
+.camera-action-btn {
 	background: transparent;
 	border: none;
 	color: #555;
-	font-size: 1.1rem;
+	font-size: 1rem;
 	cursor: pointer;
-	padding: 2px 4px;
+	padding: 4px 6px;
 	border-radius: 4px;
 	line-height: 1;
+	transition: color 0.15s, background 0.15s;
 }
-.camera-remove:hover { color: #f97316; }
+.camera-action-btn:hover { background: #1a1a2e; }
+.camera-action-btn.reconnect:hover { color: #4caf50; }
+.camera-action-btn.edit:hover { color: #60a5fa; }
+.camera-action-btn.delete:hover { color: #ef4444; }
+
+/* Edit camera modal */
+.modal-overlay {
+	display: none;
+	position: fixed;
+	inset: 0;
+	background: rgba(0,0,0,0.6);
+	z-index: 2000;
+	align-items: center;
+	justify-content: center;
+}
+.modal-overlay.open {
+	display: flex;
+}
+.modal {
+	background: #1a1a2e;
+	border: 1px solid #0f3460;
+	border-radius: 12px;
+	padding: 24px;
+	width: 100%;
+	max-width: 380px;
+}
+.modal h2 {
+	margin-bottom: 16px;
+	color: #e0e0e0;
+	text-transform: none;
+	font-size: 1.1rem;
+}
+.modal-actions {
+	display: flex;
+	gap: 8px;
+	margin-top: 8px;
+}
+.modal-btn {
+	flex: 1;
+	padding: 8px;
+	border: none;
+	border-radius: 6px;
+	font-size: 0.9rem;
+	font-weight: 600;
+	cursor: pointer;
+}
+.modal-btn.cancel {
+	background: #16213e;
+	color: #888;
+	border: 1px solid #0f3460;
+}
+.modal-btn.cancel:hover { color: #bbb; }
+.modal-btn.save {
+	background: #f97316;
+	color: #fff;
+}
+.modal-btn.save:hover { background: #ea6b0a; }
 
 /* Add camera toggle button */
 .add-camera-toggle {
@@ -776,6 +891,29 @@ h2 {
 }
 .connect-btn:active   { background: #ea6b0a; }
 .connect-btn:disabled { background: #7a2030; cursor: not-allowed; }
+
+/* ---- NDI preview ---- */
+.preview-box {
+	background: #000;
+	border-radius: 8px;
+	overflow: hidden;
+	margin-bottom: 16px;
+	aspect-ratio: 16 / 9;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	position: relative;
+}
+.preview-box img {
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	display: none;
+}
+.preview-no-signal {
+	color: #555;
+	font-size: 0.85rem;
+}
 
 /* ---- Active camera indicator above D-pad ---- */
 .active-camera {
@@ -1074,11 +1212,66 @@ function addCamera() {
 	doConnect(label, ip, port);
 }
 
+// Reconnect a saved camera (stop propagation so the card click doesn't fire).
+function reconnectCamera(label, ip, port, event) {
+	event.stopPropagation();
+	showToast('Reconnecting to ' + label + '...', 'success');
+	doConnect(label, ip, port);
+}
+
+// Open the edit modal for a saved camera.
+function editCamera(label, ip, port, event) {
+	event.stopPropagation();
+	document.getElementById('edit-old-label').value = label;
+	document.getElementById('edit-label').value = label;
+	document.getElementById('edit-ip').value = ip;
+	document.getElementById('edit-port').value = port;
+	document.getElementById('edit-modal').classList.add('open');
+}
+
+// Close the edit modal. If called from overlay click, only close if the overlay itself was clicked.
+function closeEditModal(event) {
+	if (event && event.target !== event.currentTarget) return;
+	document.getElementById('edit-modal').classList.remove('open');
+}
+
+// Save edited camera details.
+function saveEditCamera() {
+	let oldLabel = document.getElementById('edit-old-label').value;
+	let label = document.getElementById('edit-label').value.trim();
+	let ip = document.getElementById('edit-ip').value.trim();
+	let port = document.getElementById('edit-port').value;
+
+	if (!label) { showToast('Name is required', 'error'); return; }
+	if (!ip) { showToast('IP address is required', 'error'); return; }
+
+	postJSON('/api/camera/edit',
+		'old_label=' + encodeURIComponent(oldLabel) +
+		'&label=' + encodeURIComponent(label) +
+		'&ip=' + encodeURIComponent(ip) +
+		'&port=' + port
+	).then(function(data) {
+		if (data && !data.error) {
+			closeEditModal();
+			updateCameraList(data.cameras, data.ip, data.port, data.connected);
+			if (data.connected) {
+				updateStatus(true, data.label, data.ip, data.port);
+			}
+			showToast('Camera updated', 'success');
+		}
+	});
+}
+
 // Remove a saved camera from the list (stop propagation so the card click doesn't fire).
 function removeCamera(label, event) {
 	event.stopPropagation();
+	if (!confirm('Delete camera "' + label + '"?')) return;
 	postJSON('/api/camera/remove', 'label=' + encodeURIComponent(label))
-	.then(function() { location.reload(); });
+	.then(function(data) {
+		if (data) {
+			updateCameraList(data.cameras, data.ip, data.port, data.connected);
+		}
+	});
 }
 
 // Shared connection logic used by both connectCamera and addCamera.
@@ -1118,7 +1311,7 @@ function doConnect(label, ip, port) {
 			}
 		} else {
 			updateStatus(false);
-			updateCameraList(data.cameras, '', 0, false);
+			updateCameraList(data.cameras, data.ip, data.port, false);
 			showToast('Connection failed: ' + (data.error || 'unknown'), 'error');
 		}
 	})
@@ -1154,6 +1347,34 @@ function updateStatus(connected, label, ip, port) {
 		active.innerHTML = '<span class="active-label">No camera connected</span>';
 	}
 }
+
+// ---- NDI preview via WebSocket ----
+function startPreview() {
+	let img = document.getElementById('preview-img');
+	let noSignal = document.getElementById('preview-no-signal');
+	if (!img) return;
+
+	let proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+	let ws = new WebSocket(proto + '//' + location.host + '/api/preview');
+	ws.binaryType = 'blob';
+
+	ws.onmessage = function(e) {
+		let url = URL.createObjectURL(e.data);
+		img.onload = function() { URL.revokeObjectURL(url); };
+		img.src = url;
+		img.style.display = 'block';
+		noSignal.style.display = 'none';
+	};
+
+	ws.onclose = function() {
+		img.style.display = 'none';
+		noSignal.style.display = 'block';
+		setTimeout(startPreview, 3000);
+	};
+
+	ws.onerror = function() { ws.close(); };
+}
+startPreview();
 
 // Rebuilds the saved cameras list and shows/hides the "no cameras" hint and toggle button.
 function updateCameraList(cameras, activeIP, activePort, isConnected) {
@@ -1209,14 +1430,21 @@ function updateCameraList(cameras, activeIP, activePort, isConnected) {
 		let isActive = isConnected && cam.ip === activeIP && cam.port === activePort;
 		let cls = isActive ? 'camera-item active' : 'camera-item';
 		let escapedLabel = cam.label.replace(/"/g, '&quot;');
+		let esc = escapedLabel.replace(/'/g, "\\'");
 		html += '<div class="' + cls + '" onclick="connectCamera(\'' +
-			escapedLabel.replace(/'/g, "\\'") + "','" + cam.ip + "','" + cam.port + "')\">" +
+			esc + "','" + cam.ip + "','" + cam.port + "')\">" +
 			'<div class="camera-item-info">' +
 			'<span class="camera-name">' + cam.label + '</span>' +
 			'<span class="camera-addr">' + cam.ip + ':' + cam.port + '</span>' +
 			'</div>' +
-			'<button class="camera-remove" onclick="removeCamera(\'' +
-			escapedLabel.replace(/'/g, "\\'") + "',event)\">\u00d7</button>" +
+			'<div class="camera-actions">' +
+			'<button class="camera-action-btn reconnect" onclick="reconnectCamera(\'' +
+			esc + "','" + cam.ip + "','" + cam.port + "',event)\" title=\"Reconnect\">\u21bb</button>" +
+			'<button class="camera-action-btn edit" onclick="editCamera(\'' +
+			esc + "','" + cam.ip + "','" + cam.port + "',event)\" title=\"Edit\">\u270e</button>" +
+			'<button class="camera-action-btn delete" onclick="removeCamera(\'' +
+			esc + "',event)\" title=\"Delete\">\u00d7</button>" +
+			'</div>' +
 			'</div>';
 	}
 	container.innerHTML = html;

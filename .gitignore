@@ -20,3 +20,6 @@ static/
 
 presets.json
 cameras.json
+*.json.migrated
+camctl.db
+camctl.db.wal

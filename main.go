@@ -1,28 +1,23 @@
 package main
 
 import (
-	"camctl/cameras"
 	"camctl/handlers"
-	"camctl/presets"
+	"camctl/storage"
 	"log"
 
 	"github.com/rohanthewiz/rweb"
 )
 
 func main() {
-	// Initialize preset storage — creates presets.json with defaults on first run
-	presetStore, err := presets.NewStore("")
+	// Initialize DuckDB storage — creates camctl.db on first run,
+	// migrates any existing cameras.json / presets.json automatically.
+	store, err := storage.Open("camctl.db")
 	if err != nil {
-		log.Fatalf("failed to initialize presets: %v", err)
+		log.Fatalf("failed to initialize storage: %v", err)
 	}
+	defer store.Close()
 
-	// Initialize camera storage — creates cameras.json on first run
-	cameraStore, err := cameras.NewStore("")
-	if err != nil {
-		log.Fatalf("failed to initialize cameras: %v", err)
-	}
-
-	app := handlers.NewApp(presetStore, cameraStore)
+	app := handlers.NewApp(store)
 
 	// Web server on port 8383 — chosen to avoid common port conflicts
 	s := rweb.NewServer(rweb.ServerOptions{
