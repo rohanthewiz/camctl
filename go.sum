@@ -20,6 +20,8 @@ github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10500.0 h1:6ZUdeqS5oWA
 github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10500.0/go.mod h1:K25pJL26ARblGDeuAkrdblFvUen92+CwksLtPEHRqqQ=
 github.com/duckdb/duckdb-go/v2 v2.10500.0 h1:fINiqzIVyZYCuOeA1JZlT6xFXsDOM8DHMOXV+WEaYDY=
 github.com/duckdb/duckdb-go/v2 v2.10500.0/go.mod h1:0VI/sNb61DMuNLWR4kPh6AjPGnnhlKjuefcmrskXurY=
+github.com/ebitengine/purego v0.3.2 h1:+pV+tskAkn/bxEcUzGtDfw2VAe3bRQ26kdzFjPPrCww=
+github.com/ebitengine/purego v0.3.2/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
 github.com/go-viper/mapstructure/v2 v2.5.0 h1:vM5IJoUAy3d7zRSVtIwQgBj7BiWtMPfmPEgAXnvj1Ro=
 github.com/go-viper/mapstructure/v2 v2.5.0/go.mod h1:oJDH3BJKyqBA2TXFhDsKDGDTlndYOZ6rGS0BRZIxGhM=
 github.com/goccy/go-json v0.10.5 h1:Fq85nIqj+gXn/S5ahsiTlK3TmC85qgirsdTP/+DeaC4=
