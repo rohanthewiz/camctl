@@ -39,10 +39,10 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 info "Cloning camctl repository..."
-git clone --depth 1 "$REPO_URL" "$TMPDIR/camctl"
+git clone --depth 1 "$REPO_URL" "$TMPDIR/camctl-src"
 
 info "Building camctl..."
-cd "$TMPDIR/camctl"
+cd "$TMPDIR/camctl-src"
 go build -o "$TMPDIR/$BINARY_NAME" .
 
 # --- Install ---
