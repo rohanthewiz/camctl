@@ -453,6 +453,10 @@ func renderCameras(b *element.Builder, s Settings, cams []CameraItem) *element.B
 // cssStyles returns the full CSS for a dark-themed, touch-friendly remote control UI.
 func cssStyles() string {
 	return `
+:root {
+	--accent: #cc7330;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
@@ -493,7 +497,7 @@ body {
 h1 {
 	text-align: center;
 	font-size: 1.8rem;
-	color: #f97316;
+	color: var(--accent);
 	margin-bottom: 4px;
 }
 
@@ -513,7 +517,7 @@ h1 {
 	margin-bottom: 20px;
 }
 .connected    { background: #0f3d0f; color: #4caf50; border: 1px solid #4caf50; }
-.disconnected { background: #3d1a00; color: #f97316; border: 1px solid #f97316; }
+.disconnected { background: #3d1a00; color: var(--accent); border: 1px solid var(--accent); }
 
 .section {
 	margin-bottom: 24px;
@@ -561,14 +565,14 @@ h2 {
 }
 
 .dpad-btn:active {
-	background: #f97316;
+	background: var(--accent);
 	color: #fff;
 	transform: scale(0.95);
 }
 
 #btn-home {
 	background: #0f3460;
-	border-color: #f97316;
+	border-color: var(--accent);
 }
 
 /* ---- Zoom section header with gear icon ---- */
@@ -592,7 +596,7 @@ h2 {
 	transition: color 0.15s, background 0.15s;
 }
 .zoom-gear-btn:hover {
-	color: #f97316;
+	color: var(--accent);
 	background: rgba(0,0,0,0.7);
 }
 
@@ -607,7 +611,7 @@ h2 {
 .zoom-settings-panel.open {
 	max-height: 200px;
 	opacity: 1;
-	margin-top: 12px;
+	margin-top: 16px;
 }
 
 /* ---- Speed curve controls ---- */
@@ -635,9 +639,9 @@ h2 {
 	border-color: #1a4a80;
 }
 .curve-btn.active {
-	background: #f97316;
+	background: var(--accent);
 	color: #fff;
-	border-color: #f97316;
+	border-color: var(--accent);
 }
 
 /* Speed slider row: label — range input — numeric readout */
@@ -665,7 +669,7 @@ h2 {
 	width: 18px;
 	height: 18px;
 	border-radius: 50%;
-	background: #f97316;
+	background: var(--accent);
 	cursor: pointer;
 	border: 2px solid #1a1a2e;
 }
@@ -673,13 +677,13 @@ h2 {
 	width: 18px;
 	height: 18px;
 	border-radius: 50%;
-	background: #f97316;
+	background: var(--accent);
 	cursor: pointer;
 	border: 2px solid #1a1a2e;
 }
 .speed-value {
 	font-size: 0.85rem;
-	color: #f97316;
+	color: var(--accent);
 	font-weight: 700;
 	min-width: 24px;
 	text-align: center;
@@ -702,7 +706,7 @@ h2 {
 .zoom-level {
 	height: 100%;
 	width: 50%;
-	background: #f97316;
+	background: var(--accent);
 	border-radius: 3px;
 	transition: width 0.15s;
 }
@@ -904,7 +908,7 @@ h2 {
 }
 .modal-btn.cancel:hover { color: #bbb; }
 .modal-btn.save {
-	background: #f97316;
+	background: var(--accent);
 	color: #fff;
 }
 .modal-btn.save:hover { background: #ea6b0a; }
@@ -925,7 +929,7 @@ h2 {
 	transition: color 0.15s, border-color 0.15s;
 	margin-bottom: 10px;
 }
-.add-camera-toggle:hover { color: #f97316; border-color: #f97316; }
+.add-camera-toggle:hover { color: var(--accent); border-color: var(--accent); }
 .add-camera-toggle-icon {
 	font-size: 1.1rem;
 	font-weight: 700;
@@ -990,7 +994,7 @@ h2 {
 .connect-btn {
 	width: 100%;
 	padding: 10px;
-	background: #f97316;
+	background: var(--accent);
 	color: #fff;
 	border: none;
 	border-radius: 8px;
@@ -1050,7 +1054,7 @@ h2 {
 	transition: color 0.15s, background 0.15s;
 }
 .preview-gear-btn:hover {
-	color: #f97316;
+	color: var(--accent);
 	background: rgba(0,0,0,0.7);
 }
 
@@ -1092,7 +1096,7 @@ h2 {
 	color: #ccc;
 }
 .preview-opt input[type="checkbox"] {
-	accent-color: #f97316;
+	accent-color: var(--accent);
 }
 
 /* OBS host/password fields — indented below the OBS checkbox */
@@ -1170,8 +1174,8 @@ h2 {
 }
 .toast.error {
 	background: #3d1a00;
-	color: #f97316;
-	border: 1px solid #f97316;
+	color: var(--accent);
+	border: 1px solid var(--accent);
 }
 .toast.success {
 	background: #0f3d0f;
