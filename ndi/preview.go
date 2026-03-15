@@ -1,5 +1,8 @@
+//go:build ndi
+
 // Package ndi provides a live camera preview. It tries four strategies
 // in order: NDI direct, OBS WebSocket, HTTP snapshots, and RTSP via ffmpeg.
+// Each strategy can be individually enabled via PreviewOptions.
 package ndi
 
 import (
@@ -27,16 +30,6 @@ import (
 	"github.com/rohanthewiz/rweb"
 )
 
-// Previewer captures video frames from a camera for live preview.
-type Previewer interface {
-	// Start begins capturing preview frames.
-	// cameraIP is the VISCA camera address; obsHost is the OBS WebSocket
-	// address (e.g. "192.168.1.17:4455"). Either may be empty.
-	Start(cameraIP, obsHost string) error
-	Stop()
-	Frame() []byte
-	Available() bool
-}
 
 type previewer struct {
 	mu      sync.RWMutex
@@ -87,41 +80,49 @@ func (p *previewer) start() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-func (p *previewer) Start(cameraIP, obsHost string) error {
-	// Strategy 1: NDI direct from camera.
-	if cameraIP != "" && p.tryNDI(cameraIP) {
+func (p *previewer) Start(cameraIP string, opts PreviewOptions) error {
+	// Strategy 1: NDI direct from camera — requires NDI SDK (libndi).
+	if opts.EnableNDI && cameraIP != "" && p.tryNDI(cameraIP) {
 		return nil
 	}
 
-	// Strategy 2: OBS WebSocket.
-	// Build candidate list: configured host first, then fallbacks.
-	var obsHosts []string
-	if obsHost != "" {
-		obsHosts = append(obsHosts, obsHost)
-	}
-	if h := os.Getenv("OBS_WS_HOST"); h != "" && h != obsHost {
-		obsHosts = append(obsHosts, h)
-	}
-	obsHosts = append(obsHosts, "localhost:4455")
-	if cameraIP != "" {
-		obsHosts = append(obsHosts, cameraIP+":4455")
-	}
-
-	for _, host := range obsHosts {
-		ws, scene, err := connectOBS(host)
-		if err != nil {
-			log.Printf("preview: OBS at %s: %v", host, err)
-			continue
+	// Strategy 2: OBS WebSocket — requires OBS Studio with WebSocket server enabled.
+	if opts.EnableOBS {
+		// Build candidate host list: user-configured host first, env var, then fallbacks.
+		var obsHosts []string
+		if opts.OBSHost != "" {
+			obsHosts = append(obsHosts, opts.OBSHost)
 		}
-		log.Printf("preview: connected to OBS at %s, scene=%q", host, scene)
-		ctx, _ := p.start()
-		go p.pollOBS(ctx, ws, scene)
-		return nil
-	}
-	log.Printf("preview: OBS WebSocket unavailable")
+		if h := os.Getenv("OBS_WS_HOST"); h != "" && h != opts.OBSHost {
+			obsHosts = append(obsHosts, h)
+		}
+		obsHosts = append(obsHosts, "localhost:4455")
+		if cameraIP != "" {
+			obsHosts = append(obsHosts, cameraIP+":4455")
+		}
 
-	// Strategy 3: HTTP snapshot on camera IP.
-	if cameraIP != "" {
+		// Resolve password: prefer user-configured, fall back to env var.
+		password := opts.OBSPassword
+		if password == "" {
+			password = os.Getenv("OBS_WS_PASSWORD")
+		}
+
+		for _, host := range obsHosts {
+			ws, scene, err := connectOBS(host, password)
+			if err != nil {
+				log.Printf("preview: OBS at %s: %v", host, err)
+				continue
+			}
+			log.Printf("preview: connected to OBS at %s, scene=%q", host, scene)
+			ctx, _ := p.start()
+			go p.pollOBS(ctx, ws, scene)
+			return nil
+		}
+		log.Printf("preview: OBS WebSocket unavailable")
+	}
+
+	// Strategy 3: HTTP snapshot on camera IP — probes common JPEG endpoints.
+	if opts.EnableHTTP && cameraIP != "" {
 		if url, ok := probeSnapshot(cameraIP); ok {
 			log.Printf("preview: found snapshot at %s", url)
 			ctx, _ := p.start()
@@ -130,8 +131,8 @@ func (p *previewer) Start(cameraIP, obsHost string) error {
 		}
 	}
 
-	// Strategy 4: RTSP via ffmpeg.
-	if cameraIP != "" {
+	// Strategy 4: RTSP via ffmpeg — requires ffmpeg installed.
+	if opts.EnableRTSP && cameraIP != "" {
 		if _, err := exec.LookPath("ffmpeg"); err == nil {
 			if rtspURL, err := probeRTSP(cameraIP); err == nil {
 				log.Printf("preview: using RTSP at %s", rtspURL)
@@ -142,7 +143,8 @@ func (p *previewer) Start(cameraIP, obsHost string) error {
 		}
 	}
 
-	return fmt.Errorf("no preview source found (tried NDI, OBS WebSocket, HTTP snapshots, RTSP)")
+	return fmt.Errorf("no preview source found (tried enabled strategies: NDI=%v OBS=%v HTTP=%v RTSP=%v)",
+		opts.EnableNDI, opts.EnableOBS, opts.EnableHTTP, opts.EnableRTSP)
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +306,8 @@ func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 // connectOBS dials the OBS WebSocket, completes the handshake,
 // and returns the connection plus the current program scene name.
-func connectOBS(host string) (*rweb.WSConn, string, error) {
+// password is used for OBS authentication if the server requires it.
+func connectOBS(host, password string) (*rweb.WSConn, string, error) {
 	conn, err := net.DialTimeout("tcp", host, 2*time.Second)
 	if err != nil {
 		return nil, "", fmt.Errorf("dial: %w", err)
@@ -344,7 +347,7 @@ func connectOBS(host string) (*rweb.WSConn, string, error) {
 	ws := rweb.NewWSConn(&bufferedConn{Conn: conn, r: reader}, false)
 
 	// OBS Hello/Identify handshake.
-	if err := obsHandshake(ws); err != nil {
+	if err := obsHandshake(ws, password); err != nil {
 		ws.Close(1000, "handshake failed")
 		return nil, "", fmt.Errorf("handshake: %w", err)
 	}
@@ -359,7 +362,7 @@ func connectOBS(host string) (*rweb.WSConn, string, error) {
 	return ws, scene, nil
 }
 
-func obsHandshake(ws *rweb.WSConn) error {
+func obsHandshake(ws *rweb.WSConn, password string) error {
 	// Read Hello.
 	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
 	msg, err := ws.ReadMessage()
@@ -382,11 +385,10 @@ func obsHandshake(ws *rweb.WSConn) error {
 	identify := obsIdentify{RpcVersion: 1}
 
 	if hello.Auth != nil {
-		pw := os.Getenv("OBS_WS_PASSWORD")
-		if pw == "" {
-			return fmt.Errorf("OBS requires authentication; set OBS_WS_PASSWORD env var")
+		if password == "" {
+			return fmt.Errorf("OBS requires authentication; set password in preview settings or OBS_WS_PASSWORD env var")
 		}
-		identify.Auth = obsAuthString(pw, hello.Auth.Salt, hello.Auth.Challenge)
+		identify.Auth = obsAuthString(password, hello.Auth.Salt, hello.Auth.Challenge)
 	}
 
 	identData, _ := json.Marshal(identify)

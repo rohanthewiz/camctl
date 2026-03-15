@@ -1,4 +1,7 @@
-//go:build ndi
+//go:build ndi_cgo
+// NOTE: This file is the older CGo-based NDI receiver, superseded by
+// preview.go + ndilib.go (purego-based, no CGo dependency). Retained
+// under the ndi_cgo tag in case the CGo path is ever needed again.
 
 package ndi
 

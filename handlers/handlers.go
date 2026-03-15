@@ -57,6 +57,7 @@ func (a *App) RegisterRoutes(s *rweb.Server) {
 	s.Post("/api/settings", a.handleSettings)
 	s.Post("/api/camera/remove", a.handleCameraRemove)
 	s.Post("/api/camera/edit", a.handleCameraEdit)
+	s.Post("/api/preview/settings", a.handlePreviewSettings)
 	s.Get("/api/preview", a.handlePreview)
 }
 
@@ -80,10 +81,16 @@ func (a *App) handleIndex(c rweb.Context) error {
 		log.Printf("AllPresets: %v", err)
 	}
 
+	previewSettings, err := a.Store.GetPreviewSettings()
+	if err != nil {
+		log.Printf("GetPreviewSettings: %v", err)
+	}
+
 	data := views.PageData{
-		Settings: settings,
-		Presets:  presets,
-		Cameras:  camItems,
+		Settings:        settings,
+		Presets:          presets,
+		Cameras:         camItems,
+		PreviewSettings: previewSettings,
 	}
 	return c.WriteHTML(views.RenderPage(data))
 }
@@ -303,10 +310,11 @@ func (a *App) handleSettings(c rweb.Context) error {
 	a.Settings = views.Settings{CameraLabel: label, CameraIP: ip, CameraPort: port, Connected: true}
 	a.mu.Unlock()
 
-	// Start NDI preview in background (non-fatal if unavailable).
+	// Start preview in background using stored protocol preferences.
 	go func() {
-		if err := a.NDI.Start(ip); err != nil {
-			log.Printf("NDI preview: %v", err)
+		opts := a.buildPreviewOptions()
+		if err := a.NDI.Start(ip, opts); err != nil {
+			log.Printf("preview: %v", err)
 		}
 	}()
 
@@ -391,6 +399,60 @@ func (a *App) handleCameraEdit(c rweb.Context) error {
 		Port:      a.Settings.CameraPort,
 		Cameras:   a.savedCamerasJSON(),
 	})
+}
+
+// buildPreviewOptions loads stored preview settings and converts them
+// to the ndi.PreviewOptions expected by the previewer.
+func (a *App) buildPreviewOptions() ndi.PreviewOptions {
+	ps, err := a.Store.GetPreviewSettings()
+	if err != nil {
+		log.Printf("buildPreviewOptions: %v, using defaults", err)
+		return ndi.PreviewOptions{EnableNDI: true}
+	}
+	return ndi.PreviewOptions{
+		EnableNDI:   ps.EnableNDI,
+		EnableOBS:   ps.EnableOBS,
+		EnableHTTP:  ps.EnableHTTP,
+		EnableRTSP:  ps.EnableRTSP,
+		OBSHost:     ps.OBSWSHost,
+		OBSPassword: ps.OBSWSPassword,
+	}
+}
+
+// handlePreviewSettings saves preview protocol preferences and restarts the
+// preview if a camera is currently connected. This lets the user toggle
+// which strategies are tried without reconnecting the camera.
+func (a *App) handlePreviewSettings(c rweb.Context) error {
+	ps := storage.PreviewSettings{
+		EnableNDI:     c.Request().FormValue("enable_ndi") == "true",
+		EnableOBS:     c.Request().FormValue("enable_obs") == "true",
+		EnableHTTP:    c.Request().FormValue("enable_http") == "true",
+		EnableRTSP:    c.Request().FormValue("enable_rtsp") == "true",
+		OBSWSHost:     strings.TrimSpace(c.Request().FormValue("obs_ws_host")),
+		OBSWSPassword: c.Request().FormValue("obs_ws_password"),
+	}
+
+	if err := a.Store.UpdatePreviewSettings(ps); err != nil {
+		return c.WriteJSON(map[string]string{"error": err.Error()})
+	}
+
+	// Restart preview with new settings if a camera is connected.
+	a.mu.RLock()
+	connected := a.Camera != nil && a.Camera.IsConnected()
+	cameraIP := a.Settings.CameraIP
+	a.mu.RUnlock()
+
+	if connected && cameraIP != "" {
+		a.NDI.Stop()
+		go func() {
+			opts := a.buildPreviewOptions()
+			if err := a.NDI.Start(cameraIP, opts); err != nil {
+				log.Printf("preview restart: %v", err)
+			}
+		}()
+	}
+
+	return c.WriteJSON(map[string]string{"status": "ok"})
 }
 
 // handlePreview streams NDI video frames to the client via WebSocket.

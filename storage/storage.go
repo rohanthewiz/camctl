@@ -28,6 +28,17 @@ type Preset struct {
 	Label  string
 }
 
+// PreviewSettings stores which preview strategies are enabled
+// and OBS WebSocket connection details.
+type PreviewSettings struct {
+	EnableNDI     bool
+	EnableOBS     bool
+	EnableHTTP    bool
+	EnableRTSP    bool
+	OBSWSHost     string
+	OBSWSPassword string
+}
+
 // Open opens (or creates) a DuckDB database at dbPath and initializes the schema.
 // If old JSON config files exist alongside the DB, their data is migrated automatically.
 func Open(dbPath string) (*DB, error) {
@@ -56,6 +67,12 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("storage: seed presets: %w", err)
 	}
 
+	// Seed default preview settings (single-row config).
+	if err := d.seedPreviewSettings(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("storage: seed preview settings: %w", err)
+	}
+
 	return d, nil
 }
 
@@ -74,6 +91,15 @@ func (d *DB) createTables() error {
 		CREATE TABLE IF NOT EXISTS presets (
 			number INTEGER PRIMARY KEY,
 			label  TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS preview_settings (
+			id              INTEGER PRIMARY KEY DEFAULT 1,
+			enable_ndi      BOOLEAN NOT NULL DEFAULT true,
+			enable_obs      BOOLEAN NOT NULL DEFAULT false,
+			enable_http     BOOLEAN NOT NULL DEFAULT false,
+			enable_rtsp     BOOLEAN NOT NULL DEFAULT false,
+			obs_ws_host     TEXT NOT NULL DEFAULT '',
+			obs_ws_password TEXT NOT NULL DEFAULT ''
 		);
 	`)
 	return err
@@ -206,5 +232,42 @@ func (d *DB) UpdatePresetLabel(num int, label string) error {
 		return fmt.Errorf("storage: invalid preset number %d", num)
 	}
 	_, err := d.db.Exec("UPDATE presets SET label = ? WHERE number = ?", label, num)
+	return err
+}
+
+// --- Preview settings operations ---
+
+// seedPreviewSettings inserts the default preview config row if absent.
+// Only NDI Direct is enabled by default — other protocols require
+// additional software or configuration.
+func (d *DB) seedPreviewSettings() error {
+	var count int
+	if err := d.db.QueryRow("SELECT COUNT(*) FROM preview_settings").Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := d.db.Exec(
+		"INSERT INTO preview_settings (id, enable_ndi, enable_obs, enable_http, enable_rtsp, obs_ws_host, obs_ws_password) VALUES (1, true, false, false, false, '', '')",
+	)
+	return err
+}
+
+// GetPreviewSettings returns the current preview configuration.
+func (d *DB) GetPreviewSettings() (PreviewSettings, error) {
+	var ps PreviewSettings
+	err := d.db.QueryRow(
+		"SELECT enable_ndi, enable_obs, enable_http, enable_rtsp, obs_ws_host, obs_ws_password FROM preview_settings WHERE id = 1",
+	).Scan(&ps.EnableNDI, &ps.EnableOBS, &ps.EnableHTTP, &ps.EnableRTSP, &ps.OBSWSHost, &ps.OBSWSPassword)
+	return ps, err
+}
+
+// UpdatePreviewSettings persists the user's preview protocol preferences.
+func (d *DB) UpdatePreviewSettings(ps PreviewSettings) error {
+	_, err := d.db.Exec(
+		"UPDATE preview_settings SET enable_ndi = ?, enable_obs = ?, enable_http = ?, enable_rtsp = ?, obs_ws_host = ?, obs_ws_password = ? WHERE id = 1",
+		ps.EnableNDI, ps.EnableOBS, ps.EnableHTTP, ps.EnableRTSP, ps.OBSWSHost, ps.OBSWSPassword,
+	)
 	return err
 }

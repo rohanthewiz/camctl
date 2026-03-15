@@ -35,9 +35,10 @@ type CameraItem struct {
 
 // PageData bundles everything the main page template needs.
 type PageData struct {
-	Settings Settings
-	Presets  []storage.Preset
-	Cameras  []CameraItem
+	Settings        Settings
+	Presets         []storage.Preset
+	Cameras         []CameraItem
+	PreviewSettings storage.PreviewSettings
 }
 
 // RenderPage produces the full HTML page: D-pad, zoom indicator, presets, and settings.
@@ -65,7 +66,7 @@ func RenderPage(data PageData) string {
 					// Left column — movement controls
 					b.DivClass("col").R(
 						// NDI preview — shows live camera feed via WebSocket
-						renderPreview(b),
+						renderPreview(b, data.PreviewSettings),
 						// Active camera indicator — prominently shows which camera is under control
 						renderActiveCamera(b, data.Settings),
 						renderDPad(b),
@@ -155,11 +156,80 @@ func renderActiveCamera(b *element.Builder, s Settings) *element.Builder {
 	return b
 }
 
-// renderPreview creates the NDI live preview box.
-func renderPreview(b *element.Builder) *element.Builder {
-	b.DivClass("preview-box").R(
-		b.Img("id", "preview-img", "alt", "").R(),
-		b.Div("id", "preview-no-signal", "class", "preview-no-signal").T("No Signal"),
+// renderPreview creates the live preview box with a gear icon to toggle
+// a collapsible settings panel for enabling/disabling preview protocols.
+func renderPreview(b *element.Builder, ps storage.PreviewSettings) *element.Builder {
+	// Helper to conditionally add "checked" attribute for checkboxes.
+	chk := func(enabled bool) []string {
+		if enabled {
+			return []string{"type", "checkbox", "checked", "checked"}
+		}
+		return []string{"type", "checkbox"}
+	}
+
+	b.DivClass("preview-container").R(
+		// Preview box with gear icon overlay
+		b.DivClass("preview-box").R(
+			b.Img("id", "preview-img", "alt", "").R(),
+			b.Div("id", "preview-no-signal", "class", "preview-no-signal").T("No Signal"),
+			b.Button("class", "preview-gear-btn", "onclick", "togglePreviewSettings()", "title", "Preview settings").T("\u2699"),
+		),
+
+		// Collapsible settings panel — hidden by default, toggled by gear icon
+		b.Div("id", "preview-settings-panel", "class", "preview-settings-panel").R(
+			b.H3().T("Preview Source"),
+
+			// NDI Direct checkbox
+			b.DivClass("preview-opt").R(
+				b.Label("title", "Requires NDI SDK (libndi) installed on this machine").R(
+					b.Input(append(chk(ps.EnableNDI), "id", "pv-ndi")...).R(),
+					b.Span().T(" NDI Direct"),
+				),
+			),
+
+			// OBS WebSocket checkbox
+			b.DivClass("preview-opt").R(
+				b.Label("title", "Requires OBS Studio running with WebSocket server enabled (Tools \u2192 WebSocket Server Settings)").R(
+					b.Input(append(chk(ps.EnableOBS), "id", "pv-obs")...).R(),
+					b.Span().T(" OBS WebSocket"),
+				),
+			),
+
+			// OBS connection fields — indented below the OBS checkbox
+			b.DivClass("preview-obs-fields").R(
+				b.DivClass("settings-row").R(
+					b.Label("for", "pv-obs-host").T("Host"),
+					b.Input("type", "text", "id", "pv-obs-host",
+						"placeholder", "localhost:4455",
+						"value", ps.OBSWSHost).R(),
+				),
+				b.DivClass("settings-row").R(
+					b.Label("for", "pv-obs-password").T("Password"),
+					b.Input("type", "password", "id", "pv-obs-password",
+						"placeholder", "OBS WebSocket password",
+						"value", ps.OBSWSPassword).R(),
+				),
+			),
+
+			// HTTP Snapshot checkbox
+			b.DivClass("preview-opt").R(
+				b.Label("title", "Probes the camera IP for JPEG snapshot endpoints (no extra software needed)").R(
+					b.Input(append(chk(ps.EnableHTTP), "id", "pv-http")...).R(),
+					b.Span().T(" HTTP Snapshot"),
+				),
+			),
+
+			// RTSP (ffmpeg) checkbox
+			b.DivClass("preview-opt").R(
+				b.Label("title", "Requires ffmpeg installed and camera RTSP stream accessible").R(
+					b.Input(append(chk(ps.EnableRTSP), "id", "pv-rtsp")...).R(),
+					b.Span().T(" RTSP (ffmpeg)"),
+				),
+			),
+
+			// Save button
+			b.Button("class", "connect-btn", "onclick", "savePreviewSettings()").T("Save & Reconnect"),
+		),
 	)
 	return b
 }
@@ -915,6 +985,94 @@ h2 {
 	font-size: 0.85rem;
 }
 
+/* Preview settings container wraps the preview box and its settings panel */
+.preview-container {
+	position: relative;
+	margin-bottom: 16px;
+}
+.preview-container .preview-box {
+	margin-bottom: 0;
+}
+
+/* Gear icon overlay — semi-transparent, positioned top-right of the preview box */
+.preview-gear-btn {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	background: rgba(0,0,0,0.5);
+	border: none;
+	color: #aaa;
+	font-size: 1.2rem;
+	cursor: pointer;
+	padding: 4px 8px;
+	border-radius: 6px;
+	line-height: 1;
+	z-index: 10;
+	transition: color 0.15s, background 0.15s;
+}
+.preview-gear-btn:hover {
+	color: #f97316;
+	background: rgba(0,0,0,0.7);
+}
+
+/* Collapsible settings panel — max-height transition matches add-camera-form pattern */
+.preview-settings-panel {
+	max-height: 0;
+	overflow: hidden;
+	transition: max-height 0.3s ease-out, opacity 0.2s;
+	opacity: 0;
+	background: #16213e;
+	border: 1px solid #0f3460;
+	border-top: none;
+	border-radius: 0 0 8px 8px;
+	padding: 0 12px;
+}
+.preview-settings-panel.open {
+	max-height: 400px;
+	opacity: 1;
+	padding: 12px;
+}
+.preview-settings-panel h3 {
+	font-size: 0.85rem;
+	color: #aaa;
+	text-transform: uppercase;
+	letter-spacing: 1px;
+	margin-bottom: 10px;
+}
+
+/* Individual protocol checkbox rows */
+.preview-opt {
+	margin-bottom: 8px;
+}
+.preview-opt label {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	cursor: pointer;
+	font-size: 0.85rem;
+	color: #ccc;
+}
+.preview-opt input[type="checkbox"] {
+	accent-color: #f97316;
+}
+
+/* OBS host/password fields — indented below the OBS checkbox */
+.preview-obs-fields {
+	padding-left: 22px;
+	margin-bottom: 8px;
+}
+.preview-obs-fields .settings-row {
+	margin-bottom: 6px;
+}
+.preview-obs-fields label {
+	width: 70px;
+	font-size: 0.8rem;
+}
+.preview-obs-fields input {
+	font-size: 0.8rem;
+	padding: 6px 8px;
+}
+
 /* ---- Active camera indicator above D-pad ---- */
 .active-camera {
 	display: flex;
@@ -1375,6 +1533,31 @@ function startPreview() {
 	ws.onerror = function() { ws.close(); };
 }
 startPreview();
+
+// ---- Preview settings ----
+
+// Toggle the preview settings panel open/closed.
+function togglePreviewSettings() {
+	let panel = document.getElementById('preview-settings-panel');
+	panel.classList.toggle('open');
+}
+
+// Save preview protocol preferences and restart the preview.
+function savePreviewSettings() {
+	let body =
+		'enable_ndi='  + document.getElementById('pv-ndi').checked +
+		'&enable_obs=' + document.getElementById('pv-obs').checked +
+		'&enable_http=' + document.getElementById('pv-http').checked +
+		'&enable_rtsp=' + document.getElementById('pv-rtsp').checked +
+		'&obs_ws_host=' + encodeURIComponent(document.getElementById('pv-obs-host').value) +
+		'&obs_ws_password=' + encodeURIComponent(document.getElementById('pv-obs-password').value);
+
+	postJSON('/api/preview/settings', body).then(function(data) {
+		if (data && data.status === 'ok') {
+			showToast('Preview settings saved', 'success');
+		}
+	});
+}
 
 // Rebuilds the saved cameras list and shows/hides the "no cameras" hint and toggle button.
 function updateCameraList(cameras, activeIP, activePort, isConnected) {

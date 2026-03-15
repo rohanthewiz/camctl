@@ -1,3 +1,5 @@
+//go:build ndi
+
 // Minimal NDI bindings via purego — receive-only, no send/routing symbols required.
 package ndi
 
