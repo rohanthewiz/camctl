@@ -1,0 +1,1159 @@
+╭─── Claude Code v2.1.76 ──────────────────────────────────────────────────────╮
+│                             │ Tips for getting started                       │
+│       Welcome back Ro!      │ Run /init to create a CLAUDE.md file with ins… │
+│                             │ ────────────────────────────────────────────── │
+│           ▐▛███▜▌           │ Recent activity                                │
+│          ▝▜█████▛▘          │ 34m ago  /exit                                 │
+│            ▘▘ ▝▝            │ 1w ago   Zoom is working but other camera con… │
+│                             │ 1w ago   After adding the ability to save the… │
+│   Sonnet 4.6 · Claude Pro   │ /resume for more                               │
+│      ~/projs/go/camctl      │                                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+  ✻ Voice mode is now available · /voice to enable
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Plan to implement                                                            │
+│                                                                              │
+│ Preview Settings Panel for Mini-Viewer                                       │
+│                                                                              │
+│ Context                                                                      │
+│                                                                              │
+│ Currently the previewer tries all 4 protocols (NDI, OBS WebSocket, HTTP      │
+│ Snapshot, RTSP) in sequence until one works. The user wants explicit control │
+│  over which protocols are enabled via checkboxes. OBS WebSocket config       │
+│ (host, password) is currently only via env vars — it needs UI fields         │
+│ positioned near the OBS checkbox. A gear icon on the preview box toggles a   │
+│ collapsible settings panel.                                                  │
+│                                                                              │
+│ Also fixes: Start interface mismatch between preview.go (2 args) and         │
+│ stub.go/handler (1 arg).                                                     │
+│                                                                              │
+│ Files to Modify                                                              │
+│                                                                              │
+│ ┌──────────────────────┬───────────────────────────────────────────────────┐ │
+│ │         File         │                      Changes                      │ │
+│ ├──────────────────────┼───────────────────────────────────────────────────┤ │
+│ │                      │ Add PreviewOptions struct; update Previewer.Start │ │
+│ │ ndi/preview.go       │  signature; gate each strategy by its enable      │ │
+│ │                      │ flag; pass password to connectOBS→obsHandshake    │ │
+│ ├──────────────────────┼───────────────────────────────────────────────────┤ │
+│ │ ndi/stub.go          │ Update Start signature to match new interface     │ │
+│ ├──────────────────────┼───────────────────────────────────────────────────┤ │
+│ │ storage/storage.go   │ Add PreviewSettings struct, preview_settings      │ │
+│ │                      │ table, seed, Get/Update methods                   │ │
+│ ├──────────────────────┼───────────────────────────────────────────────────┤ │
+│ │                      │ New POST /api/preview/settings handler; update    │ │
+│ │ handlers/handlers.go │ handleSettings and handleIndex to use stored      │ │
+│ │                      │ preview settings                                  │ │
+│ ├──────────────────────┼───────────────────────────────────────────────────┤ │
+│ │                      │ Gear icon overlay on preview box; collapsible     │ │
+│ │ views/views.go       │ settings panel with protocol checkboxes + OBS     │ │
+│ │                      │ fields; CSS + JS                                  │ │
+│ └──────────────────────┴───────────────────────────────────────────────────┘ │
+│                                                                              │
+│ Implementation Steps                                                         │
+│                                                                              │
+│ 1. ndi/preview.go — New PreviewOptions + updated interface                   │
+│                                                                              │
+│ Add struct near top:                                                         │
+│ type PreviewOptions struct {                                                 │
+│     EnableNDI      bool                                                      │
+│     EnableOBS      bool                                                      │
+│     EnableHTTP     bool                                                      │
+│     EnableRTSP     bool                                                      │
+│     OBSHost        string                                                    │
+│     OBSPassword    string                                                    │
+│ }                                                                            │
+│                                                                              │
+│ Update interface: Start(cameraIP string, opts PreviewOptions) error          │
+│                                                                              │
+│ Update Start method — guard each strategy block with opts.Enable* flag. Use  │
+│ opts.OBSHost as first candidate in OBS host list, opts.OBSPassword for auth. │
+│                                                                              │
+│ Update connectOBS(host, password string) and obsHandshake(ws, password) to   │
+│ accept password param instead of reading os.Getenv("OBS_WS_PASSWORD").       │
+│                                                                              │
+│ 2. ndi/stub.go — Fix interface mismatch                                      │
+│                                                                              │
+│ Change Start(ip string) error → Start(cameraIP string, opts PreviewOptions)  │
+│ error                                                                        │
+│                                                                              │
+│ 3. storage/storage.go — Persistence                                          │
+│                                                                              │
+│ Add table in createTables:                                                   │
+│ CREATE TABLE IF NOT EXISTS preview_settings (                                │
+│     id              INTEGER PRIMARY KEY DEFAULT 1,                           │
+│     enable_ndi      BOOLEAN NOT NULL DEFAULT true,                           │
+│     enable_obs      BOOLEAN NOT NULL DEFAULT false,                          │
+│     enable_http     BOOLEAN NOT NULL DEFAULT false,                          │
+│     enable_rtsp     BOOLEAN NOT NULL DEFAULT false,                          │
+│     obs_ws_host     TEXT NOT NULL DEFAULT '',                                │
+│     obs_ws_password TEXT NOT NULL DEFAULT ''                                 │
+│ );                                                                           │
+│                                                                              │
+│ Only NDI Direct is enabled by default. Other protocols require additional    │
+│ software/configuration so they stay off until explicitly enabled.            │
+│                                                                              │
+│ Add PreviewSettings struct, seedPreviewSettings(), GetPreviewSettings(),     │
+│ UpdatePreviewSettings().                                                     │
+│                                                                              │
+│ 4. handlers/handlers.go — API + wiring                                       │
+│                                                                              │
+│ - Register s.Post("/api/preview/settings", a.handlePreviewSettings) in       │
+│ RegisterRoutes                                                               │
+│ - handlePreviewSettings: parse form params, save to DB, restart preview if   │
+│ connected                                                                    │
+│ - handleSettings (line 308): load PreviewSettings from DB, build             │
+│ PreviewOptions, pass to Start                                                │
+│ - handleIndex: load PreviewSettings, add to PageData                         │
+│                                                                              │
+│ 5. views/views.go — UI                                                       │
+│                                                                              │
+│ PageData: Add PreviewSettings storage.PreviewSettings field.                 │
+│                                                                              │
+│ renderPreview(b, ps): Wrap in .preview-container div. Add gear button (⚙     │
+│ unicode) positioned absolute top-right of .preview-box. Below the preview    │
+│ box, add hidden .preview-settings-panel div containing:                      │
+│ - "Preview Source" heading                                                   │
+│ - Checkbox: NDI Direct — title="Requires NDI SDK (libndi) installed on this  │
+│ machine"                                                                     │
+│ - Checkbox: OBS WebSocket — title="Requires OBS Studio running with          │
+│ WebSocket server enabled (Tools → WebSocket Server Settings)"                │
+│   - Indented below: Host input, Password input (these fields are always      │
+│ visible when panel is open — they only apply when OBS is checked)            │
+│ - Checkbox: HTTP Snapshot — title="Probes the camera IP for JPEG snapshot    │
+│ endpoints (no extra software needed)"                                        │
+│ - Checkbox: RTSP (ffmpeg) — title="Requires ffmpeg installed and camera RTSP │
+│  stream accessible"                                                          │
+│ - "Save & Reconnect" button                                                  │
+│                                                                              │
+│ Each checkbox label has a title attribute providing a tooltip with the       │
+│ protocol's requirements.                                                     │
+│                                                                              │
+│ CSS: Gear icon semi-transparent overlay, .preview-settings-panel uses        │
+│ max-height transition (same pattern as add-camera-form). .preview-box        │
+│ already has position: relative.                                              │
+│                                                                              │
+│ JS: togglePreviewSettings() toggles .open class. savePreviewSettings()       │
+│ collects checkbox/input values, calls postJSON('/api/preview/settings',      │
+│ ...), shows toast on success.                                                │
+│                                                                              │
+│ 6. Update renderPreview call site                                            │
+│                                                                              │
+│ Line 68: renderPreview(b) → renderPreview(b, data.PreviewSettings)           │
+│                                                                              │
+│ Verification                                                                 │
+│                                                                              │
+│ 1. Build: go build ./... (should compile with and without -tags ndi)         │
+│ 2. Run the app, load the page                                                │
+│ 3. Gear icon visible on preview box corner regardless of video state         │
+│ 4. Click gear — settings panel slides open with only NDI checked by default, │
+│  others unchecked                                                            │
+│ 5. Uncheck some protocols, fill OBS host/password, click Save                │
+│ 6. Verify toast appears, preview restarts with only enabled protocols        │
+│ 7. Reload page — settings persist from DB                                    │
+│ 8. Connect to camera — preview uses stored protocol preferences              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+⏺ Searched for 1 pattern, read 7 files (ctrl+o to expand)
+
+⏺ Let me check if this builds currently, and see ndilib.go for the symbols used
+  by preview.go.
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ Bash(go build ./... 2>&1 | head -30)
+  ⎿  # camctl/ndi
+     ndi/stub.go:10:6: NewPreviewer redeclared in this block
+        ndi/preview.go:50:6: other declaration of NewPreviewer
+     … +5 lines (ctrl+o to expand)
+
+⏺ The build is already broken due to the Start signature mismatch and missing
+  build tags. I'll implement the full plan now.
+
+  Step 1: Create ndi/types.go — shared types without build tags.
+
+⏺ Write(ndi/types.go)
+  ⎿  Wrote 24 lines to ndi/types.go
+       1 // types.go defines the Previewer interface and PreviewOptions u
+         sed by both
+       2 // the real implementation (preview.go, build tag ndi) and the s
+         tub (stub.go, !ndi).
+       3 package ndi
+       4 
+       5 // PreviewOptions controls which preview strategies are tried an
+         d
+       6 // provides OBS WebSocket credentials so they don't have to come
+          from env vars.
+       7 type PreviewOptions struct {
+       8        EnableNDI  bool
+       9        EnableOBS  bool
+      10        EnableHTTP bool
+     … +14 lines (ctrl+o to expand)
+
+⏺ Step 2: Update preview.go — add build tag, remove interface definition, gate
+  strategies by options, pass password to OBS.
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 3 lines
+      1 +//go:build ndi                                                  
+      2 +                                                                
+      3  // Package ndi provides a live camera preview. It tries four str
+         ategies
+      4  // in order: NDI direct, OBS WebSocket, HTTP snapshots, and RTSP
+          via ffmpeg.
+      5 +// Each strategy can be individually enabled via PreviewOptions.
+      6  package ndi
+      7  
+      8  import (
+  ⎿  Found 6 new diagnostic issues in 4 files (ctrl+o to expand)
+
+⏺ Now remove the Previewer interface from preview.go since it's in types.go, and
+   update the Start signature to use PreviewOptions.
+
+⏺ Update(ndi/preview.go)
+  ⎿  Removed 10 lines
+      30    "github.com/rohanthewiz/rweb"
+      31  )
+      32  
+      33 -// Previewer captures video frames from a camera for live previ
+         -ew.                                                            
+      34 -type Previewer interface {                                     
+      35 -  // Start begins capturing preview frames.                    
+      36 -  // cameraIP is the VISCA camera address; obsHost is the OBS W
+         -ebSocket                                                       
+      37 -  // address (e.g. "192.168.1.17:4455"). Either may be empty.  
+      38 -  Start(cameraIP, obsHost string) error                        
+      39 -  Stop()                                                       
+      40 -  Frame() []byte                                               
+      41 -  Available() bool                                             
+      42 -}                                                              
+      33  
+      34  type previewer struct {
+      35    mu      sync.RWMutex
+  ⎿  Found 3 new diagnostic issues in 3 files (ctrl+o to expand)
+
+⏺ Now update the Start method signature and gate each strategy by its enable
+  flag.
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 40 lines, removed 31 lines
+       80    return ctx, cancel
+       81  }
+       82  
+       83 -func (p *previewer) Start(cameraIP, obsHost string) error {   
+       84 -  // Strategy 1: NDI direct from camera.                      
+       85 -  if cameraIP != "" && p.tryNDI(cameraIP) {                   
+       83 +func (p *previewer) Start(cameraIP string, opts PreviewOptions
+          +) error {                                                     
+       84 +  // Strategy 1: NDI direct from camera — requires NDI SDK (li
+          +bndi).                                                        
+       85 +  if opts.EnableNDI && cameraIP != "" && p.tryNDI(cameraIP) { 
+       86      return nil
+       87    }
+       88  
+       89 -  // Strategy 2: OBS WebSocket.                               
+       90 -  // Build candidate list: configured host first, then fallbac
+          -ks.                                                           
+       91 -  var obsHosts []string                                       
+       92 -  if obsHost != "" {                                          
+       93 -    obsHosts = append(obsHosts, obsHost)                      
+       94 -  }                                                           
+       95 -  if h := os.Getenv("OBS_WS_HOST"); h != "" && h != obsHost { 
+       96 -    obsHosts = append(obsHosts, h)                            
+       97 -  }                                                           
+       98 -  obsHosts = append(obsHosts, "localhost:4455")               
+       99 -  if cameraIP != "" {                                         
+      100 -    obsHosts = append(obsHosts, cameraIP+":4455")             
+      101 -  }                                                           
+       89 +  // Strategy 2: OBS WebSocket — requires OBS Studio with WebS
+          +ocket server enabled.                                         
+       90 +  if opts.EnableOBS {                                         
+       91 +    // Build candidate host list: user-configured host first, 
+          +env var, then fallbacks.                                      
+       92 +    var obsHosts []string                                     
+       93 +    if opts.OBSHost != "" {                                   
+       94 +      obsHosts = append(obsHosts, opts.OBSHost)               
+       95 +    }                                                         
+       96 +    if h := os.Getenv("OBS_WS_HOST"); h != "" && h != opts.OBS
+          +Host {                                                        
+       97 +      obsHosts = append(obsHosts, h)                          
+       98 +    }                                                         
+       99 +    obsHosts = append(obsHosts, "localhost:4455")             
+      100 +    if cameraIP != "" {                                       
+      101 +      obsHosts = append(obsHosts, cameraIP+":4455")           
+      102 +    }                                                         
+      103  
+      103 -  for _, host := range obsHosts {                             
+      104 -    ws, scene, err := connectOBS(host)                        
+      105 -    if err != nil {                                           
+      106 -      log.Printf("preview: OBS at %s: %v", host, err)         
+      107 -      continue                                                
+      104 +    // Resolve password: prefer user-configured, fall back to 
+          +env var.                                                      
+      105 +    password := opts.OBSPassword                              
+      106 +    if password == "" {                                       
+      107 +      password = os.Getenv("OBS_WS_PASSWORD")                 
+      108      }
+      109 -    log.Printf("preview: connected to OBS at %s, scene=%q", ho
+          -st, scene)                                                    
+      110 -    ctx, _ := p.start()                                       
+      111 -    go p.pollOBS(ctx, ws, scene)                              
+      112 -    return nil                                                
+      109 +                                                              
+      110 +    for _, host := range obsHosts {                           
+      111 +      ws, scene, err := connectOBS(host, password)            
+      112 +      if err != nil {                                         
+      113 +        log.Printf("preview: OBS at %s: %v", host, err)       
+      114 +        continue                                              
+      115 +      }                                                       
+      116 +      log.Printf("preview: connected to OBS at %s, scene=%q", 
+          +host, scene)                                                  
+      117 +      ctx, _ := p.start()                                     
+      118 +      go p.pollOBS(ctx, ws, scene)                            
+      119 +      return nil                                              
+      120 +    }                                                         
+      121 +    log.Printf("preview: OBS WebSocket unavailable")          
+      122    }
+      114 -  log.Printf("preview: OBS WebSocket unavailable")            
+      123  
+      116 -  // Strategy 3: HTTP snapshot on camera IP.                  
+      117 -  if cameraIP != "" {                                         
+      124 +  // Strategy 3: HTTP snapshot on camera IP — probes common JP
+          +EG endpoints.                                                 
+      125 +  if opts.EnableHTTP && cameraIP != "" {                      
+      126      if url, ok := probeSnapshot(cameraIP); ok {
+      127        log.Printf("preview: found snapshot at %s", url)
+      128        ctx, _ := p.start()
+     ...
+      131      }
+      132    }
+      133  
+      126 -  // Strategy 4: RTSP via ffmpeg.                             
+      127 -  if cameraIP != "" {                                         
+      134 +  // Strategy 4: RTSP via ffmpeg — requires ffmpeg installed. 
+      135 +  if opts.EnableRTSP && cameraIP != "" {                      
+      136      if _, err := exec.LookPath("ffmpeg"); err == nil {
+      137        if rtspURL, err := probeRTSP(cameraIP); err == nil {
+      138          log.Printf("preview: using RTSP at %s", rtspURL)
+     ...
+      143      }
+      144    }
+      145  
+      138 -  return fmt.Errorf("no preview source found (tried NDI, OBS W
+          -ebSocket, HTTP snapshots, RTSP)")                             
+      146 +  return fmt.Errorf("no preview source found (tried enabled st
+          +rategies: NDI=%v OBS=%v HTTP=%v RTSP=%v)",                    
+      147 +    opts.EnableNDI, opts.EnableOBS, opts.EnableHTTP, opts.Enab
+          +leRTSP)                                                       
+      148  }
+      149  
+      150  // -----------------------------------------------------------
+           ----------------
+
+⏺ Now update connectOBS and obsHandshake to accept password parameter.
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 2 lines, removed 1 line
+      306  
+      307  // connectOBS dials the OBS WebSocket, completes the handshake
+           ,
+      308  // and returns the connection plus the current program scene n
+           ame.
+      309 -func connectOBS(host string) (*rweb.WSConn, string, error) {  
+      309 +// password is used for OBS authentication if the server requi
+          +res it.                                                       
+      310 +func connectOBS(host, password string) (*rweb.WSConn, string, 
+          +error) {                                                      
+      311    conn, err := net.DialTimeout("tcp", host, 2*time.Second)
+      312    if err != nil {
+      313      return nil, "", fmt.Errorf("dial: %w", err)
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 1 line, removed 1 line
+      347    ws := rweb.NewWSConn(&bufferedConn{Conn: conn, r: reader}, f
+           alse)
+      348  
+      349    // OBS Hello/Identify handshake.
+      350 -  if err := obsHandshake(ws); err != nil {                    
+      350 +  if err := obsHandshake(ws, password); err != nil {          
+      351      ws.Close(1000, "handshake failed")
+      352      return nil, "", fmt.Errorf("handshake: %w", err)
+      353    }
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 1 line, removed 1 line
+      362    return ws, scene, nil
+      363  }
+      364  
+      365 -func obsHandshake(ws *rweb.WSConn) error {                    
+      365 +func obsHandshake(ws *rweb.WSConn, password string) error {   
+      366    // Read Hello.
+      367    ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+      368    msg, err := ws.ReadMessage()
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 3 lines, removed 4 lines
+      385    identify := obsIdentify{RpcVersion: 1}
+      386  
+      387    if hello.Auth != nil {
+      388 -    pw := os.Getenv("OBS_WS_PASSWORD")                        
+      389 -    if pw == "" {                                             
+      390 -      return fmt.Errorf("OBS requires authentication; set OBS_
+          -WS_PASSWORD env var")                                         
+      388 +    if password == "" {                                       
+      389 +      return fmt.Errorf("OBS requires authentication; set pass
+          +word in preview settings or OBS_WS_PASSWORD env var")         
+      390      }
+      392 -    identify.Auth = obsAuthString(pw, hello.Auth.Salt, hello.A
+          -uth.Challenge)                                                
+      391 +    identify.Auth = obsAuthString(password, hello.Auth.Salt, h
+          +ello.Auth.Challenge)                                          
+      392    }
+      393  
+      394    identData, _ := json.Marshal(identify)
+
+⏺ Step 3: Update stub.go — fix interface mismatch.
+
+⏺ Update(ndi/stub.go)
+  ⎿  Added 1 line, removed 1 line
+       9  // NewPreviewer returns a stub previewer when built without the
+           ndi tag.
+      10  func NewPreviewer() Previewer { return &stub{} }
+      11  
+      12 -func (s *stub) Start(ip string) error {                        
+      12 +func (s *stub) Start(cameraIP string, opts PreviewOptions) erro
+         +r {                                                            
+      13    return fmt.Errorf("NDI preview not available (build with -tag
+          s ndi)")
+      14  }
+      15  func (s *stub) Stop()           {}
+
+⏺ Step 4: Add ndilib.go build tag — it's only needed when the real previewer is
+  compiled.
+
+⏺ Update(ndi/ndilib.go)
+  ⎿  Added 2 lines
+      1 +//go:build ndi                                                  
+      2 +                                                                
+      3  // Minimal NDI bindings via purego — receive-only, no send/routi
+         ng symbols required.
+      4  package ndi
+      5  
+  ⎿  Found 3 new diagnostic issues in 1 file (ctrl+o to expand)
+
+⏺ Good — those are just lint warnings because gopls isn't using the ndi build
+  tag. Now let's update storage.
+
+  Step 5: Update storage/storage.go — add PreviewSettings table and CRUD.
+
+⏺ Update(storage/storage.go)
+  ⎿  Added 11 lines
+      28    Label  string
+      29  }
+      30  
+      31 +// PreviewSettings stores which preview strategies are enabled 
+      32 +// and OBS WebSocket connection details.                       
+      33 +type PreviewSettings struct {                                  
+      34 +  EnableNDI     bool                                           
+      35 +  EnableOBS     bool                                           
+      36 +  EnableHTTP    bool                                           
+      37 +  EnableRTSP    bool                                           
+      38 +  OBSWSHost     string                                         
+      39 +  OBSWSPassword string                                         
+      40 +}                                                              
+      41 +                                                               
+      42  // Open opens (or creates) a DuckDB database at dbPath and init
+          ializes the schema.
+      43  // If old JSON config files exist alongside the DB, their data 
+          is migrated automatically.
+      44  func Open(dbPath string) (*DB, error) {
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+⏺ Update(storage/storage.go)
+  ⎿  Added 9 lines
+       86        number INTEGER PRIMARY KEY,
+       87        label  TEXT NOT NULL
+       88      );
+       89 +    CREATE TABLE IF NOT EXISTS preview_settings (             
+       90 +      id              INTEGER PRIMARY KEY DEFAULT 1,          
+       91 +      enable_ndi      BOOLEAN NOT NULL DEFAULT true,          
+       92 +      enable_obs      BOOLEAN NOT NULL DEFAULT false,         
+       93 +      enable_http     BOOLEAN NOT NULL DEFAULT false,         
+       94 +      enable_rtsp     BOOLEAN NOT NULL DEFAULT false,         
+       95 +      obs_ws_host     TEXT NOT NULL DEFAULT '',               
+       96 +      obs_ws_password TEXT NOT NULL DEFAULT ''                
+       97 +    );                                                        
+       98    `)
+       99    return err
+      100  }
+
+⏺ Now add seed, Get, and Update methods. Add after the seedPresets function.
+
+⏺ Update(storage/storage.go)
+  ⎿  Added 6 lines
+      67      return nil, fmt.Errorf("storage: seed presets: %w", err)
+      68    }
+      69  
+      70 +  // Seed default preview settings (single-row config).        
+      71 +  if err := d.seedPreviewSettings(); err != nil {              
+      72 +    sqlDB.Close()                                              
+      73 +    return nil, fmt.Errorf("storage: seed preview settings: %w"
+         +, err)                                                         
+      74 +  }                                                            
+      75 +                                                               
+      76    return d, nil
+      77  }
+      78  
+
+⏺ Now add the preview settings methods at the end of the file.
+
+⏺ Update(storage/storage.go)
+  ⎿  Added 37 lines
+      234    _, err := d.db.Exec("UPDATE presets SET label = ? WHERE numb
+           er = ?", label, num)
+      235    return err
+      236  }
+      237 +                                                              
+      238 +// --- Preview settings operations ---                        
+      239 +                                                              
+      240 +// seedPreviewSettings inserts the default preview config row 
+          +if absent.                                                    
+      241 +// Only NDI Direct is enabled by default — other protocols req
+          +uire                                                          
+      242 +// additional software or configuration.                      
+      243 +func (d *DB) seedPreviewSettings() error {                    
+      244 +  var count int                                               
+      245 +  if err := d.db.QueryRow("SELECT COUNT(*) FROM preview_settin
+          +gs").Scan(&count); err != nil {                               
+      246 +    return err                                                
+      247 +  }                                                           
+      248 +  if count > 0 {                                              
+      249 +    return nil                                                
+      250 +  }                                                           
+      251 +  _, err := d.db.Exec(                                        
+      252 +    "INSERT INTO preview_settings (id, enable_ndi, enable_obs,
+          + enable_http, enable_rtsp, obs_ws_host, obs_ws_password) VALUE
+          +S (1, true, false, false, false, '', '')",                    
+      253 +  )                                                           
+      254 +  return err                                                  
+      255 +}                                                             
+      256 +                                                              
+      257 +// GetPreviewSettings returns the current preview configuratio
+          +n.                                                            
+      258 +func (d *DB) GetPreviewSettings() (PreviewSettings, error) {  
+      259 +  var ps PreviewSettings                                      
+      260 +  err := d.db.QueryRow(                                       
+      261 +    "SELECT enable_ndi, enable_obs, enable_http, enable_rtsp, 
+          +obs_ws_host, obs_ws_password FROM preview_settings WHERE id = 
+          +1",                                                           
+      262 +  ).Scan(&ps.EnableNDI, &ps.EnableOBS, &ps.EnableHTTP, &ps.Ena
+          +bleRTSP, &ps.OBSWSHost, &ps.OBSWSPassword)                    
+      263 +  return ps, err                                              
+      264 +}                                                             
+      265 +                                                              
+      266 +// UpdatePreviewSettings persists the user's preview protocol 
+          +preferences.                                                  
+      267 +func (d *DB) UpdatePreviewSettings(ps PreviewSettings) error {
+      268 +  _, err := d.db.Exec(                                        
+      269 +    "UPDATE preview_settings SET enable_ndi = ?, enable_obs = 
+          +?, enable_http = ?, enable_rtsp = ?, obs_ws_host = ?, obs_ws_p
+          +assword = ? WHERE id = 1",                                    
+      270 +    ps.EnableNDI, ps.EnableOBS, ps.EnableHTTP, ps.EnableRTSP, 
+          +ps.OBSWSHost, ps.OBSWSPassword,                               
+      271 +  )                                                           
+      272 +  return err                                                  
+      273 +}                                                             
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+⏺ The diagnostic should clear after saving. Let me verify the file looks
+  correct.
+
+⏺ Bash(go vet ./storage/... 2>&1)
+  ⎿  (No output)
+
+⏺ Step 6: Update handlers/handlers.go — add preview settings endpoint, wire up
+  PreviewOptions.
+
+⏺ Update(handlers/handlers.go)
+  ⎿  Added 1 line
+      57    s.Post("/api/settings", a.handleSettings)
+      58    s.Post("/api/camera/remove", a.handleCameraRemove)
+      59    s.Post("/api/camera/edit", a.handleCameraEdit)
+      60 +  s.Post("/api/preview/settings", a.handlePreviewSettings)     
+      61    s.Get("/api/preview", a.handlePreview)
+      62  }
+      63  
+
+⏺ Now update handleIndex to load and pass preview settings.
+
+⏺ Update(handlers/handlers.go)
+  ⎿  Added 9 lines, removed 3 lines
+      81      log.Printf("AllPresets: %v", err)
+      82    }
+      83  
+      84 +  previewSettings, err := a.Store.GetPreviewSettings()         
+      85 +  if err != nil {                                              
+      86 +    log.Printf("GetPreviewSettings: %v", err)                  
+      87 +  }                                                            
+      88 +                                                               
+      89    data := views.PageData{
+      85 -    Settings: settings,                                        
+      86 -    Presets:  presets,                                         
+      87 -    Cameras:  camItems,                                        
+      90 +    Settings:        settings,                                 
+      91 +    Presets:          presets,                                 
+      92 +    Cameras:         camItems,                                 
+      93 +    PreviewSettings: previewSettings,                          
+      94    }
+      95    return c.WriteHTML(views.RenderPage(data))
+      96  }
+  ⎿  Found 2 new diagnostic issues in 1 file (ctrl+o to expand)
+
+⏺ Now update handleSettings to build PreviewOptions from stored settings and
+  pass to Start.
+
+⏺ Update(handlers/handlers.go)
+  ⎿  Added 4 lines, removed 3 lines
+      310    a.Settings = views.Settings{CameraLabel: label, CameraIP: ip
+           , CameraPort: port, Connected: true}
+      311    a.mu.Unlock()
+      312  
+      313 -  // Start NDI preview in background (non-fatal if unavailable
+          -).                                                            
+      313 +  // Start preview in background using stored protocol prefere
+          +nces.                                                         
+      314    go func() {
+      315 -    if err := a.NDI.Start(ip); err != nil {                   
+      316 -      log.Printf("NDI preview: %v", err)                      
+      315 +    opts := a.buildPreviewOptions()                           
+      316 +    if err := a.NDI.Start(ip, opts); err != nil {             
+      317 +      log.Printf("preview: %v", err)                          
+      318      }
+      319    }()
+      320  
+  ⎿  Found 2 new diagnostic issues in 1 file (ctrl+o to expand)
+
+⏺ Now add buildPreviewOptions and handlePreviewSettings at the end of the file,
+  before handlePreview.
+
+⏺ Update(handlers/handlers.go)
+  ⎿  Added 54 lines
+      401    })
+      402  }
+      403  
+      404 +// buildPreviewOptions loads stored preview settings and conve
+          +rts them                                                      
+      405 +// to the ndi.PreviewOptions expected by the previewer.       
+      406 +func (a *App) buildPreviewOptions() ndi.PreviewOptions {      
+      407 +  ps, err := a.Store.GetPreviewSettings()                     
+      408 +  if err != nil {                                             
+      409 +    log.Printf("buildPreviewOptions: %v, using defaults", err)
+      410 +    return ndi.PreviewOptions{EnableNDI: true}                
+      411 +  }                                                           
+      412 +  return ndi.PreviewOptions{                                  
+      413 +    EnableNDI:   ps.EnableNDI,                                
+      414 +    EnableOBS:   ps.EnableOBS,                                
+      415 +    EnableHTTP:  ps.EnableHTTP,                               
+      416 +    EnableRTSP:  ps.EnableRTSP,                               
+      417 +    OBSHost:     ps.OBSWSHost,                                
+      418 +    OBSPassword: ps.OBSWSPassword,                            
+      419 +  }                                                           
+      420 +}                                                             
+      421 +                                                              
+      422 +// handlePreviewSettings saves preview protocol preferences an
+          +d restarts the                                                
+      423 +// preview if a camera is currently connected. This lets the u
+          +ser toggle                                                    
+      424 +// which strategies are tried without reconnecting the camera.
+      425 +func (a *App) handlePreviewSettings(c rweb.Context) error {   
+      426 +  ps := storage.PreviewSettings{                              
+      427 +    EnableNDI:     c.Request().FormValue("enable_ndi") == "tru
+          +e",                                                           
+      428 +    EnableOBS:     c.Request().FormValue("enable_obs") == "tru
+          +e",                                                           
+      429 +    EnableHTTP:    c.Request().FormValue("enable_http") == "tr
+          +ue",                                                          
+      430 +    EnableRTSP:    c.Request().FormValue("enable_rtsp") == "tr
+          +ue",                                                          
+      431 +    OBSWSHost:     strings.TrimSpace(c.Request().FormValue("ob
+          +s_ws_host")),                                                 
+      432 +    OBSWSPassword: c.Request().FormValue("obs_ws_password"),  
+      433 +  }                                                           
+      434 +                                                              
+      435 +  if err := a.Store.UpdatePreviewSettings(ps); err != nil {   
+      436 +    return c.WriteJSON(map[string]string{"error": err.Error()}
+          +)                                                             
+      437 +  }                                                           
+      438 +                                                              
+      439 +  // Restart preview with new settings if a camera is connecte
+          +d.                                                            
+      440 +  a.mu.RLock()                                                
+      441 +  connected := a.Camera != nil && a.Camera.IsConnected()      
+      442 +  cameraIP := a.Settings.CameraIP                             
+      443 +  a.mu.RUnlock()                                              
+      444 +                                                              
+      445 +  if connected && cameraIP != "" {                            
+      446 +    a.NDI.Stop()                                              
+      447 +    go func() {                                               
+      448 +      opts := a.buildPreviewOptions()                         
+      449 +      if err := a.NDI.Start(cameraIP, opts); err != nil {     
+      450 +        log.Printf("preview restart: %v", err)                
+      451 +      }                                                       
+      452 +    }()                                                       
+      453 +  }                                                           
+      454 +                                                              
+      455 +  return c.WriteJSON(map[string]string{"status": "ok"})       
+      456 +}                                                             
+      457 +                                                              
+      458  // handlePreview streams NDI video frames to the client via We
+           bSocket.
+      459  // Each message is a binary JPEG frame sent at roughly 10fps.
+      460  func (a *App) handlePreview(c rweb.Context) error {
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+⏺ That diagnostic should be stale. Let me verify the build.
+
+⏺ Bash(go build ./... 2>&1)
+  ⎿  Error: Exit code 1
+     # camctl/handlers
+     handlers/handlers.go:93:3: unknown field PreviewSettings in struct literal 
+     of type views.PageData
+
+⏺ Need to add PreviewSettings to PageData in views first. Let me do that now.
+
+  Step 7: Update views/views.go — add PreviewSettings to PageData, gear icon,
+  settings panel.
+
+⏺ Update(views/views.go)
+  ⎿  Added 4 lines, removed 3 lines
+      35  
+      36  // PageData bundles everything the main page template needs.
+      37  type PageData struct {
+      38 -  Settings Settings                                            
+      39 -  Presets  []storage.Preset                                    
+      40 -  Cameras  []CameraItem                                        
+      38 +  Settings        Settings                                     
+      39 +  Presets         []storage.Preset                             
+      40 +  Cameras         []CameraItem                                 
+      41 +  PreviewSettings storage.PreviewSettings                      
+      42  }
+      43  
+      44  // RenderPage produces the full HTML page: D-pad, zoom indicato
+          r, presets, and settings.
+
+⏺ Now update renderPreview to accept PreviewSettings and add the gear icon +
+  settings panel.
+
+⏺ Update(views/views.go)
+  ⎿  Added 1 line, removed 1 line
+      66            // Left column — movement controls
+      67            b.DivClass("col").R(
+      68              // NDI preview — shows live camera feed via WebSock
+          et
+      69 -            renderPreview(b),                                  
+      69 +            renderPreview(b, data.PreviewSettings),            
+      70              // Active camera indicator — prominently shows whic
+          h camera is under control
+      71              renderActiveCamera(b, data.Settings),
+      72              renderDPad(b),
+
+⏺ Now rewrite renderPreview to include the gear icon and collapsible settings
+  panel.
+
+⏺ Update(views/views.go)
+  ⎿  Added 74 lines, removed 5 lines
+      156    return b
+      157  }
+      158  
+      159 -// renderPreview creates the NDI live preview box.            
+      160 -func renderPreview(b *element.Builder) *element.Builder {     
+      161 -  b.DivClass("preview-box").R(                                
+      162 -    b.Img("id", "preview-img", "alt", "").R(),                
+      163 -    b.Div("id", "preview-no-signal", "class", "preview-no-sign
+          -al").T("No Signal"),                                          
+      159 +// renderPreview creates the live preview box with a gear icon
+          + to toggle                                                    
+      160 +// a collapsible settings panel for enabling/disabling preview
+          + protocols.                                                   
+      161 +func renderPreview(b *element.Builder, ps storage.PreviewSetti
+          +ngs) *element.Builder {                                       
+      162 +  // Helper to conditionally add "checked" attribute for check
+          +boxes.                                                        
+      163 +  chk := func(enabled bool) []string {                        
+      164 +    if enabled {                                              
+      165 +      return []string{"type", "checkbox", "checked", "checked"
+          +}                                                             
+      166 +    }                                                         
+      167 +    return []string{"type", "checkbox"}                       
+      168 +  }                                                           
+      169 +                                                              
+      170 +  b.DivClass("preview-container").R(                          
+      171 +    // Preview box with gear icon overlay                     
+      172 +    b.DivClass("preview-box").R(                              
+      173 +      b.Img("id", "preview-img", "alt", "").R(),              
+      174 +      b.Div("id", "preview-no-signal", "class", "preview-no-si
+          +gnal").T("No Signal"),                                        
+      175 +      b.Button("class", "preview-gear-btn", "onclick", "toggle
+          +PreviewSettings()", "title", "Preview settings").T("\u2699"), 
+      176 +    ),                                                        
+      177 +                                                              
+      178 +    // Collapsible settings panel — hidden by default, toggled
+          + by gear icon                                                 
+      179 +    b.Div("id", "preview-settings-panel", "class", "preview-se
+          +ttings-panel").R(                                             
+      180 +      b.H3().T("Preview Source"),                             
+      181 +                                                              
+      182 +      // NDI Direct checkbox                                  
+      183 +      b.DivClass("preview-opt").R(                            
+      184 +        b.Label("title", "Requires NDI SDK (libndi) installed 
+          +on this machine").R(                                          
+      185 +          b.Input(append(chk(ps.EnableNDI), "id", "pv-ndi")...
+          +).R(),                                                        
+      186 +          b.Span().T(" NDI Direct"),                          
+      187 +        ),                                                    
+      188 +      ),                                                      
+      189 +                                                              
+      190 +      // OBS WebSocket checkbox                               
+      191 +      b.DivClass("preview-opt").R(                            
+      192 +        b.Label("title", "Requires OBS Studio running with Web
+          +Socket server enabled (Tools \u2192 WebSocket Server Settings)
+          +").R(                                                         
+      193 +          b.Input(append(chk(ps.EnableOBS), "id", "pv-obs")...
+          +).R(),                                                        
+      194 +          b.Span().T(" OBS WebSocket"),                       
+      195 +        ),                                                    
+      196 +      ),                                                      
+      197 +                                                              
+      198 +      // OBS connection fields — indented below the OBS checkb
+          +ox                                                            
+      199 +      b.DivClass("preview-obs-fields").R(                     
+      200 +        b.DivClass("settings-row").R(                         
+      201 +          b.Label("for", "pv-obs-host").T("Host"),            
+      202 +          b.Input("type", "text", "id", "pv-obs-host",        
+      203 +            "placeholder", "localhost:4455",                  
+      204 +            "value", ps.OBSWSHost).R(),                       
+      205 +        ),                                                    
+      206 +        b.DivClass("settings-row").R(                         
+      207 +          b.Label("for", "pv-obs-password").T("Password"),    
+      208 +          b.Input("type", "password", "id", "pv-obs-password",
+      209 +            "placeholder", "OBS WebSocket password",          
+      210 +            "value", ps.OBSWSPassword).R(),                   
+      211 +        ),                                                    
+      212 +      ),                                                      
+      213 +                                                              
+      214 +      // HTTP Snapshot checkbox                               
+      215 +      b.DivClass("preview-opt").R(                            
+      216 +        b.Label("title", "Probes the camera IP for JPEG snapsh
+          +ot endpoints (no extra software needed)").R(                  
+      217 +          b.Input(append(chk(ps.EnableHTTP), "id", "pv-http").
+          +..).R(),                                                      
+      218 +          b.Span().T(" HTTP Snapshot"),                       
+      219 +        ),                                                    
+      220 +      ),                                                      
+      221 +                                                              
+      222 +      // RTSP (ffmpeg) checkbox                               
+      223 +      b.DivClass("preview-opt").R(                            
+      224 +        b.Label("title", "Requires ffmpeg installed and camera
+          + RTSP stream accessible").R(                                  
+      225 +          b.Input(append(chk(ps.EnableRTSP), "id", "pv-rtsp").
+          +..).R(),                                                      
+      226 +          b.Span().T(" RTSP (ffmpeg)"),                       
+      227 +        ),                                                    
+      228 +      ),                                                      
+      229 +                                                              
+      230 +      // Save button                                          
+      231 +      b.Button("class", "connect-btn", "onclick", "savePreview
+          +Settings()").T("Save & Reconnect"),                           
+      232 +    ),                                                        
+      233    )
+      234    return b
+      235  }
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+⏺ Now add the CSS for the preview settings panel. I'll add it after the existing
+   preview CSS.
+
+⏺ Update(views/views.go)
+  ⎿  Added 88 lines
+       985    font-size: 0.85rem;
+       986  }
+       987  
+       988 +/* Preview settings container wraps the preview box and its s
+           +ettings panel */                                             
+       989 +.preview-container {                                         
+       990 +  position: relative;                                        
+       991 +  margin-bottom: 16px;                                       
+       992 +}                                                            
+       993 +.preview-container .preview-box {                            
+       994 +  margin-bottom: 0;                                          
+       995 +}                                                            
+       996 +                                                             
+       997 +/* Gear icon overlay — semi-transparent, positioned top-right
+           + of the preview box */                                       
+       998 +.preview-gear-btn {                                          
+       999 +  position: absolute;                                        
+      1000 +  top: 8px;                                                  
+      1001 +  right: 8px;                                                
+      1002 +  background: rgba(0,0,0,0.5);                               
+      1003 +  border: none;                                              
+      1004 +  color: #aaa;                                               
+      1005 +  font-size: 1.2rem;                                         
+      1006 +  cursor: pointer;                                           
+      1007 +  padding: 4px 8px;                                          
+      1008 +  border-radius: 6px;                                        
+      1009 +  line-height: 1;                                            
+      1010 +  z-index: 10;                                               
+      1011 +  transition: color 0.15s, background 0.15s;                 
+      1012 +}                                                            
+      1013 +.preview-gear-btn:hover {                                    
+      1014 +  color: #f97316;                                            
+      1015 +  background: rgba(0,0,0,0.7);                               
+      1016 +}                                                            
+      1017 +                                                             
+      1018 +/* Collapsible settings panel — max-height transition matches
+           + add-camera-form pattern */                                  
+      1019 +.preview-settings-panel {                                    
+      1020 +  max-height: 0;                                             
+      1021 +  overflow: hidden;                                          
+      1022 +  transition: max-height 0.3s ease-out, opacity 0.2s;        
+      1023 +  opacity: 0;                                                
+      1024 +  background: #16213e;                                       
+      1025 +  border: 1px solid #0f3460;                                 
+      1026 +  border-top: none;                                          
+      1027 +  border-radius: 0 0 8px 8px;                                
+      1028 +  padding: 0 12px;                                           
+      1029 +}                                                            
+      1030 +.preview-settings-panel.open {                               
+      1031 +  max-height: 400px;                                         
+      1032 +  opacity: 1;                                                
+      1033 +  padding: 12px;                                             
+      1034 +}                                                            
+      1035 +.preview-settings-panel h3 {                                 
+      1036 +  font-size: 0.85rem;                                        
+      1037 +  color: #aaa;                                               
+      1038 +  text-transform: uppercase;                                 
+      1039 +  letter-spacing: 1px;                                       
+      1040 +  margin-bottom: 10px;                                       
+      1041 +}                                                            
+      1042 +                                                             
+      1043 +/* Individual protocol checkbox rows */                      
+      1044 +.preview-opt {                                               
+      1045 +  margin-bottom: 8px;                                        
+      1046 +}                                                            
+      1047 +.preview-opt label {                                         
+      1048 +  display: flex;                                             
+      1049 +  align-items: center;                                       
+      1050 +  gap: 6px;                                                  
+      1051 +  cursor: pointer;                                           
+      1052 +  font-size: 0.85rem;                                        
+      1053 +  color: #ccc;                                               
+      1054 +}                                                            
+      1055 +.preview-opt input[type="checkbox"] {                        
+      1056 +  accent-color: #f97316;                                     
+      1057 +}                                                            
+      1058 +                                                             
+      1059 +/* OBS host/password fields — indented below the OBS checkbox
+           + */                                                          
+      1060 +.preview-obs-fields {                                        
+      1061 +  padding-left: 22px;                                        
+      1062 +  margin-bottom: 8px;                                        
+      1063 +}                                                            
+      1064 +.preview-obs-fields .settings-row {                          
+      1065 +  margin-bottom: 6px;                                        
+      1066 +}                                                            
+      1067 +.preview-obs-fields label {                                  
+      1068 +  width: 70px;                                               
+      1069 +  font-size: 0.8rem;                                         
+      1070 +}                                                            
+      1071 +.preview-obs-fields input {                                  
+      1072 +  font-size: 0.8rem;                                         
+      1073 +  padding: 6px 8px;                                          
+      1074 +}                                                            
+      1075 +                                                             
+      1076  /* ---- Active camera indicator above D-pad ---- */
+      1077  .active-camera {
+      1078    display: flex;
+
+⏺ Now add the JS functions for togglePreviewSettings and savePreviewSettings.
+  I'll add them after the startPreview function.
+
+⏺ Update(views/views.go)
+  ⎿  Added 25 lines
+      1534  }
+      1535  startPreview();
+      1536  
+      1537 +// ---- Preview settings ----                                
+      1538 +                                                             
+      1539 +// Toggle the preview settings panel open/closed.            
+      1540 +function togglePreviewSettings() {                           
+      1541 +  let panel = document.getElementById('preview-settings-panel
+           +');                                                          
+      1542 +  panel.classList.toggle('open');                            
+      1543 +}                                                            
+      1544 +                                                             
+      1545 +// Save preview protocol preferences and restart the preview.
+      1546 +function savePreviewSettings() {                             
+      1547 +  let body =                                                 
+      1548 +    'enable_ndi='  + document.getElementById('pv-ndi').checke
+           +d +                                                          
+      1549 +    '&enable_obs=' + document.getElementById('pv-obs').checke
+           +d +                                                          
+      1550 +    '&enable_http=' + document.getElementById('pv-http').chec
+           +ked +                                                        
+      1551 +    '&enable_rtsp=' + document.getElementById('pv-rtsp').chec
+           +ked +                                                        
+      1552 +    '&obs_ws_host=' + encodeURIComponent(document.getElementB
+           +yId('pv-obs-host').value) +                                  
+      1553 +    '&obs_ws_password=' + encodeURIComponent(document.getElem
+           +entById('pv-obs-password').value);                           
+      1554 +                                                             
+      1555 +  postJSON('/api/preview/settings', body).then(function(data)
+           + {                                                           
+      1556 +    if (data && data.status === 'ok') {                      
+      1557 +      showToast('Preview settings saved', 'success');        
+      1558 +    }                                                        
+      1559 +  });                                                        
+      1560 +}                                                            
+      1561 +                                                             
+      1562  // Rebuilds the saved cameras list and shows/hides the "no ca
+            meras" hint and toggle button.
+      1563  function updateCameraList(cameras, activeIP, activePort, isCo
+            nnected) {
+      1564    let section = document.querySelector('.cameras-section');
+
+⏺ Now let's verify everything builds.
+
+⏺ Bash(go build ./... 2>&1)
+  ⎿  (No output)
+
+⏺ Builds cleanly without -tags ndi. Let me also verify it works with the ndi
+  tag.
+
+⏺ Bash(go build -tags ndi ./... 2>&1)
+  ⎿  Error: Exit code 1
+     # camctl/ndi
+     ndi/receiver.go:124:6: NewPreviewer redeclared in this block
+        ndi/preview.go:43:6: other declaration of NewPreviewer
+     ndi/receiver.go:125:9: cannot use &receiver{} (value of type *receiver) as 
+     Previewer value in return statement: *receiver does not implement Previewer
+      (wrong type for method Start)
+                have Start(string) error
+                want Start(string, PreviewOptions) error
+
+⏺ There's a receiver.go that also defines NewPreviewer. Let me check it.
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ receiver.go is an older CGo-based NDI implementation that conflicts with the
+  purego-based preview.go. I'll change its build tag to avoid the conflict while
+   preserving the code.
+
+⏺ Update(ndi/receiver.go)
+  ⎿  Added 4 lines, removed 1 line
+      1 -//go:build ndi                                                  
+      1 +//go:build ndi_cgo                                              
+      2 +// NOTE: This file is the older CGo-based NDI receiver, supersed
+        +ed by                                                           
+      3 +// preview.go + ndilib.go (purego-based, no CGo dependency). Ret
+        +ained                                                           
+      4 +// under the ndi_cgo tag in case the CGo path is ever needed aga
+        +in.                                                             
+      5  
+      6  package ndi
+      7  
+
+⏺ Bash(go build ./... 2>&1 && echo "--- no tag OK ---" && go build -tags ndi
+      ./... 2>&1 && echo "--- ndi tag OK ---")
+  ⎿  --- no tag OK ---
+     --- ndi tag OK ---
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+⏺ Both builds pass. Let me also run go vet to catch any issues.
+
+⏺ Bash(go vet ./... 2>&1 && go vet -tags ndi ./... 2>&1)
+  ⎿  (No output)
+
+⏺ Clean. Let me do a quick review of the final state of the key files to make
+  sure everything is consistent.
+
+⏺ Bash(go run . --help 2>&1 || true)
+  ⎿  Running in the background (↓ to manage)
+
+⏺ Bash(timeout 3 go run . 2>&1 || true)
+  ⎿  (eval):1: command not found: timeout
+
+⏺ Bash(gtimeout 3 go run . 2>&1 || true)
+  ⎿  (eval):1: command not found: gtimeout
+
+⏺ Bash(go build -o /tmp/camctl-test . 2>&1 && echo "Binary built OK" && rm
+      /tmp/camctl-test)
+  ⎿  Binary built OK
+
+⏺ Everything builds and vets cleanly. Here's a summary of all changes:
+
+  Changes Made
+
+  ndi/types.go (new) — Shared types without build tags:
+  - PreviewOptions struct with EnableNDI/OBS/HTTP/RTSP flags +
+  OBSHost/OBSPassword
+  - Previewer interface with updated Start(cameraIP string, opts PreviewOptions)
+   error
+
+  ndi/preview.go — Added //go:build ndi tag, removed interface definition (moved
+   to types.go), updated Start to gate each strategy by opts.Enable* flags,
+  updated connectOBS and obsHandshake to accept a password parameter instead of
+  reading env vars directly
+
+  ndi/ndilib.go — Added //go:build ndi tag (only needed by the real previewer)
+
+  ndi/receiver.go — Changed build tag from ndi to ndi_cgo to avoid conflict with
+   the purego-based implementation in preview.go
+
+  ndi/stub.go — Fixed Start signature to match new interface: Start(cameraIP 
+  string, opts PreviewOptions) error
+
+  storage/storage.go — Added preview_settings table (single-row config),
+  PreviewSettings struct, seedPreviewSettings(), GetPreviewSettings(),
+  UpdatePreviewSettings(). Only NDI is enabled by default.
+
+  handlers/handlers.go — Added POST /api/preview/settings route and handler,
+  buildPreviewOptions() helper, updated handleSettings to pass PreviewOptions to
+   Start, updated handleIndex to load and pass PreviewSettings to the view
+
+  views/views.go — Added PreviewSettings to PageData, updated renderPreview with
+   gear icon (⚙) overlay and collapsible settings panel containing protocol
+  checkboxes with tooltip descriptions + OBS host/password fields + "Save &
+  Reconnect" button. Added CSS for gear icon, settings panel, and checkbox
+  styling. Added togglePreviewSettings() and savePreviewSettings() JS functions.
+
+✻ Baked for 10m 41s
+
+❯ commit this                                                                   
+
+⏺ Bash(git status && echo "---DIFF---" && git diff && echo "---LOG---" && git
+      log --oneline -5)
+  ⎿  On branch master
+     Your branch is up to date with 'origin/master'.
+     … +323 lines (ctrl+o to expand)
+
+⏺ Bash(git add handlers/handlers.go ndi/ndilib.go ndi/preview.go ndi/receiver.go
+       ndi/stub.go ndi/types.go storage/storage.go views/views.go)
+  ⎿  (No output)
+
+⏺ Bash(git commit -m "$(cat <<'EOF'
+      Add preview settings panel with per-protocol enable controls…)
+  ⎿  [master 058462f] Add preview settings panel with per-protocol enable c
+     ontrols
+      8 files changed, 404 insertions(+), 65 deletions(-)
+      create mode 100644 ndi/types.go
+
+⏺ Bash(git status)
+  ⎿  On branch master
+     Your branch is ahead of 'origin/master' by 1 commit.
+       (use "git push" to publish your local commits)
+     … +2 lines (ctrl+o to expand)
+
+⏺ Committed as 058462f. Working tree is clean, branch is 1 commit ahead of
+  origin.
