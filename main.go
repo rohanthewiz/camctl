@@ -4,13 +4,30 @@ import (
 	"camctl/handlers"
 	"camctl/storage"
 	"log"
+	"os"
+	"path/filepath"
 
 	"github.com/rohanthewiz/rweb"
 )
 
 func main() {
+	// Resolve ~/.camctl/ as the app's config/data directory.
+	// Created on first run; on subsequent runs we just change into it.
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("failed to determine home directory: %v", err)
+	}
+	dataDir := filepath.Join(homeDir, ".camctl")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		log.Fatalf("failed to create data directory %s: %v", dataDir, err)
+	}
+	if err := os.Chdir(dataDir); err != nil {
+		log.Fatalf("failed to change to data directory %s: %v", dataDir, err)
+	}
+
 	// Initialize DuckDB storage — creates camctl.db on first run,
 	// migrates any existing cameras.json / presets.json automatically.
+	// DB is created in the current directory (~/.camctl/).
 	store, err := storage.Open("camctl.db")
 	if err != nil {
 		log.Fatalf("failed to initialize storage: %v", err)
