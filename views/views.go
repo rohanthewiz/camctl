@@ -70,16 +70,7 @@ func RenderPage(data PageData) string {
 						// Active camera indicator — prominently shows which camera is under control
 						renderActiveCamera(b, data.Settings),
 						renderDPad(b),
-						renderSpeedControls(b),
-
-						// Zoom indicator
-						b.DivClass("section").R(
-							b.H2().T("Zoom"),
-							b.PClass("zoom-hint").T("Scroll wheel to zoom in / out"),
-							b.DivClass("zoom-bar").R(
-								b.Div("id", "zoom-indicator", "class", "zoom-level").R(),
-							),
-						),
+						renderZoomSection(b),
 					),
 
 					// Right column — cameras (primary), then presets
@@ -285,32 +276,44 @@ func dpadButton(b *element.Builder, direction, label, id string) *element.Builde
 	return b
 }
 
-// renderSpeedControls creates the speed curve selector and max-speed slider.
-// Placed below the D-pad so the operator can adjust how hold duration
-// maps to movement speed.
-//
-//	Curve selector: three mutually-exclusive buttons (Constant / Linear / Expo)
-//	Speed slider:   sets the target max speed (1–24) for the selected curve
-func renderSpeedControls(b *element.Builder) *element.Builder {
-	b.DivClass("section speed-controls").R(
-		// Curve selector — three toggle buttons in a horizontal group
-		b.DivClass("curve-selector").R(
-			b.Button("id", "curve-constant", "class", "curve-btn active",
-				"onclick", "setCurve('constant')").T("Constant"),
-			b.Button("id", "curve-linear", "class", "curve-btn",
-				"onclick", "setCurve('linear')").T("Linear"),
-			b.Button("id", "curve-expo", "class", "curve-btn",
-				"onclick", "setCurve('expo')").T("Expo"),
+
+// renderZoomSection creates the zoom indicator with a gear icon that toggles
+// the advanced zoom controls (speed curve selector + speed slider).
+// The zoom heading, hint, and bar are always visible; the advanced controls
+// are hidden by default and revealed by clicking the gear.
+func renderZoomSection(b *element.Builder) *element.Builder {
+	b.DivClass("section zoom-section").R(
+		// Zoom heading row with gear icon for advanced settings
+		b.DivClass("zoom-header").R(
+			b.H2().T("Zoom"),
+			b.Button("class", "zoom-gear-btn", "onclick", "toggleZoomSettings()", "title", "Zoom settings").T("\u2699"),
+		),
+		b.PClass("zoom-hint").T("Scroll wheel to zoom in / out"),
+		b.DivClass("zoom-bar").R(
+			b.Div("id", "zoom-indicator", "class", "zoom-level").R(),
 		),
 
-		// Speed slider with numeric readout
-		b.DivClass("speed-slider-row").R(
-			b.SpanClass("speed-label").T("Speed"),
-			b.Input("type", "range", "id", "speed-slider",
-				"min", "1", "max", "24", "value", "8",
-				"class", "speed-slider",
-				"oninput", "updateSpeedDisplay(this.value)").R(),
-			b.Span("id", "speed-value", "class", "speed-value").T("8"),
+		// Collapsible advanced zoom controls — hidden by default, toggled by gear icon
+		b.Div("id", "zoom-settings-panel", "class", "zoom-settings-panel").R(
+			// Curve selector — three toggle buttons in a horizontal group
+			b.DivClass("curve-selector").R(
+				b.Button("id", "curve-constant", "class", "curve-btn active",
+					"onclick", "setCurve('constant')").T("Constant"),
+				b.Button("id", "curve-linear", "class", "curve-btn",
+					"onclick", "setCurve('linear')").T("Linear"),
+				b.Button("id", "curve-expo", "class", "curve-btn",
+					"onclick", "setCurve('expo')").T("Expo"),
+			),
+
+			// Speed slider with numeric readout
+			b.DivClass("speed-slider-row").R(
+				b.SpanClass("speed-label").T("Speed"),
+				b.Input("type", "range", "id", "speed-slider",
+					"min", "1", "max", "24", "value", "8",
+					"class", "speed-slider",
+					"oninput", "updateSpeedDisplay(this.value)").R(),
+				b.Span("id", "speed-value", "class", "speed-value").T("8"),
+			),
 		),
 	)
 	return b
@@ -568,10 +571,46 @@ h2 {
 	border-color: #f97316;
 }
 
-/* ---- Speed curve controls ---- */
-.speed-controls {
-	margin-bottom: 8px;
+/* ---- Zoom section header with gear icon ---- */
+.zoom-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
 }
+.zoom-header h2 {
+	margin-bottom: 0;
+}
+.zoom-gear-btn {
+	background: rgba(0,0,0,0.5);
+	border: none;
+	color: #aaa;
+	font-size: 1.2rem;
+	cursor: pointer;
+	padding: 4px 8px;
+	border-radius: 6px;
+	line-height: 1;
+	transition: color 0.15s, background 0.15s;
+}
+.zoom-gear-btn:hover {
+	color: #f97316;
+	background: rgba(0,0,0,0.7);
+}
+
+/* Collapsible zoom settings panel — same pattern as preview-settings-panel */
+.zoom-settings-panel {
+	max-height: 0;
+	overflow: hidden;
+	transition: max-height 0.3s ease-out, opacity 0.2s;
+	opacity: 0;
+	margin-top: 0;
+}
+.zoom-settings-panel.open {
+	max-height: 200px;
+	opacity: 1;
+	margin-top: 12px;
+}
+
+/* ---- Speed curve controls ---- */
 
 /* Curve selector: horizontal toggle-button group */
 .curve-selector {
@@ -1533,6 +1572,14 @@ function startPreview() {
 	ws.onerror = function() { ws.close(); };
 }
 startPreview();
+
+// ---- Zoom settings ----
+
+// Toggle the advanced zoom controls panel open/closed.
+function toggleZoomSettings() {
+	let panel = document.getElementById('zoom-settings-panel');
+	panel.classList.toggle('open');
+}
 
 // ---- Preview settings ----
 
