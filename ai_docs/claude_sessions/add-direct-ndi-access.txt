@@ -1,0 +1,633 @@
+╭─── Claude Code v2.1.76 ──────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting        │
+│                  Welcome back Ro!                  │ started                 │
+│                                                    │ Run /init to create a … │
+│                      ▗ ▗   ▖ ▖                     │ ─────────────────────── │
+│                                                    │ Recent activity         │
+│                        ▘▘ ▝▝                       │ No recent activity      │
+│                                                    │                         │
+│ Opus 4.6 (1M context) · Claude Max · Rohan Allison │                         │
+│                 ~/projs/go/camctl                  │                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Plan to implement                                                            │
+│                                                                              │
+│ NDI Direct Camera Preview                                                    │
+│                                                                              │
+│ Context                                                                      │
+│                                                                              │
+│ The mini camera preview currently only works via OBS WebSocket               │
+│ (screenshotting the OBS program scene). The user wants to see individual     │
+│ camera outputs directly from the NDI stream, not the OBS composite. OBS      │
+│ WebSocket should remain as a fallback option.                                │
+│                                                                              │
+│ Key discovery: The NDI runtime (libndi.dylib v5.0.0) is already installed at │
+│  /usr/local/lib/ on this system. The Go library github.com/bitfocus/gondi    │
+│ provides NDI bindings via purego — no CGo required, no SDK headers needed,   │
+│ just the runtime .dylib.                                                     │
+│                                                                              │
+│ Plan                                                                         │
+│                                                                              │
+│ 1. Add gondi dependency                                                      │
+│                                                                              │
+│ go get github.com/bitfocus/gondi                                             │
+│                                                                              │
+│ 2. Add NDI receiver to ndi/preview.go                                        │
+│                                                                              │
+│ Make NDI the first strategy in Start(), shifting OBS to strategy 2:          │
+│                                                                              │
+│ Strategy 1: NDI direct (new) — discover NDI source by camera IP, receive     │
+│ low-bandwidth frames                                                         │
+│ Strategy 2: OBS WebSocket (existing) — screenshot OBS program scene          │
+│ Strategy 3: HTTP snapshot (existing)                                         │
+│ Strategy 4: RTSP via ffmpeg (existing)                                       │
+│                                                                              │
+│ NDI receiver flow:                                                           │
+│ 1. gondi.InitLibrary("") — empty string lets gondi find libndi automatically │
+│ 2. gondi.NewFindInstance(true, "", cameraIP) — pass camera IP as extraIPs    │
+│ for fast discovery                                                           │
+│ 3. finder.WaitForSources(5000) then finder.GetCurrentSources()               │
+│ 4. Match source by IP (check source.Address() contains camera IP)            │
+│ 5. Create receiver: gondi.NewRecvInstance(&settings) with                    │
+│ RecvColorFormatRGBA + RecvBandwidthLowest                                    │
+│ 6. Capture loop: receiver.CaptureV2(&videoFrame, nil, nil, 500)              │
+│ 7. On FrameTypeVideo: convert RGBA pixel data to JPEG, store in p.frame      │
+│ 8. receiver.FreeVideoV2(&videoFrame) after copying                           │
+│                                                                              │
+│ JPEG encoding from RGBA frame:                                               │
+│ - Create image.NRGBA from videoFrame.Data (width × height × 4 bytes)         │
+│ - Use image/jpeg to encode at quality 60                                     │
+│ - Store as p.frame for the WebSocket handler                                 │
+│                                                                              │
+│ 3. Files to modify                                                           │
+│                                                                              │
+│ - ndi/preview.go — Add NDI receiver functions, reorder strategy cascade      │
+│ - go.mod — New dependency: github.com/bitfocus/gondi                         │
+│                                                                              │
+│ No changes needed to handlers, views, or storage — the Previewer interface   │
+│ stays the same.                                                              │
+│                                                                              │
+│ 4. NDI receiver functions to add                                             │
+│                                                                              │
+│ // tryNDI attempts to connect to an NDI source at the given camera IP.       │
+│ // Returns true if successful (capture goroutine started).                   │
+│ func (p *previewer) tryNDI(cameraIP string) bool                             │
+│                                                                              │
+│ // captureNDI runs the NDI frame capture loop.                               │
+│ func (p *previewer) captureNDI(ctx context.Context, recv                     │
+│ *gondi.RecvInstance)                                                         │
+│                                                                              │
+│ // encodeRGBAFrame converts raw RGBA pixel data to JPEG.                     │
+│ func encodeRGBAFrame(data []byte, width, height, stride int) []byte          │
+│                                                                              │
+│ 5. Updated Start() cascade                                                   │
+│                                                                              │
+│ func (p *previewer) Start(cameraIP, obsHost string) error {                  │
+│     // Strategy 1: NDI direct from camera                                    │
+│     if cameraIP != "" && p.tryNDI(cameraIP) {                                │
+│         return nil                                                           │
+│     }                                                                        │
+│                                                                              │
+│     // Strategy 2: OBS WebSocket (existing code, unchanged)                  │
+│     // ...                                                                   │
+│                                                                              │
+│     // Strategy 3: HTTP snapshot (existing)                                  │
+│     // Strategy 4: RTSP via ffmpeg (existing)                                │
+│ }                                                                            │
+│                                                                              │
+│ Verification                                                                 │
+│                                                                              │
+│ 1. go build ./... — confirm it compiles with gondi + purego                  │
+│ 2. Start camctl, connect to a camera                                         │
+│ 3. Server log should show: preview: connected to NDI source "CAMERA_NAME" at │
+│  <ip>                                                                        │
+│ 4. Preview box should show live camera feed (not OBS scene composite)        │
+│ 5. If NDI fails (e.g., camera doesn't output NDI), OBS WebSocket kicks in as │
+│  fallback                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+⏺ Let me read the current files first.
+
+⏺ Read 2 files (ctrl+o to expand)
+
+⏺ Now let me add the dependency and check the gondi API.
+
+⏺ Bash(go get github.com/bitfocus/gondi)
+  ⎿  go: downloading github.com/bitfocus/gondi v0.0.2
+     go: downloading github.com/ebitengine/purego v0.3.2
+     go: added github.com/bitfocus/gondi v0.0.2
+     go: added github.com/ebitengine/purego v0.3.2
+
+⏺ Explore(Explore gondi API surface)
+  ⎿  Done (14 tool uses · 35.7k tokens · 49s)
+  (ctrl+o to expand)
+
+⏺ Now I have the full gondi API. Let me implement the NDI receiver. Key details:
+   Data is *byte (need unsafe.Slice), resolution is Xres/Yres, stride is
+  LineStride, color format RecvColorFormatRGBXRGBA = 2.
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 6 lines, removed 2 lines
+      1 -// Package ndi provides a live camera preview. It tries three st
+        -rategies                                                        
+      2 -// in order: OBS WebSocket (localhost:4455), HTTP snapshots, and
+        - RTSP via ffmpeg.                                               
+      1 +// Package ndi provides a live camera preview. It tries four str
+        +ategies                                                         
+      2 +// in order: NDI direct, OBS WebSocket, HTTP snapshots, and RTSP
+        + via ffmpeg.                                                    
+      3  package ndi
+      4  
+      5  import (
+     ...
+      11    "encoding/base64"
+      12    "encoding/json"
+      13    "fmt"
+      14 +  "image"                                                      
+      15 +  "image/jpeg"                                                 
+      16    "io"
+      17    "log"
+      18    "net"
+     ...
+      22    "strings"
+      23    "sync"
+      24    "time"
+      25 +  "unsafe"                                                     
+      26  
+      27 +  "github.com/bitfocus/gondi"                                  
+      28    "github.com/rohanthewiz/rweb"
+      29  )
+      30  
+
+⏺ Now update the Start() method to add NDI as strategy 1:
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 6 lines, removed 1 line
+       89  }
+       90  
+       91  func (p *previewer) Start(cameraIP, obsHost string) error {
+       92 -  // Strategy 1: OBS WebSocket.                               
+       92 +  // Strategy 1: NDI direct from camera.                      
+       93 +  if cameraIP != "" && p.tryNDI(cameraIP) {                   
+       94 +    return nil                                                
+       95 +  }                                                           
+       96 +                                                              
+       97 +  // Strategy 2: OBS WebSocket.                               
+       98    // Build candidate list: configured host first, then fallbac
+           ks.
+       99    var obsHosts []string
+      100    if obsHost != "" {
+
+⏺ Now update the strategy comments for consistency:
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 1 line, removed 1 line
+      121    }
+      122    log.Printf("preview: OBS WebSocket unavailable")
+      123  
+      124 -  // Strategy 2: HTTP snapshot on camera IP.                  
+      124 +  // Strategy 3: HTTP snapshot on camera IP.                  
+      125    if cameraIP != "" {
+      126      if url, ok := probeSnapshot(cameraIP); ok {
+      127        log.Printf("preview: found snapshot at %s", url)
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 1 line, removed 1 line
+      131      }
+      132    }
+      133  
+      134 -  // Strategy 3: RTSP via ffmpeg.                             
+      134 +  // Strategy 4: RTSP via ffmpeg.                             
+      135    if cameraIP != "" {
+      136      if _, err := exec.LookPath("ffmpeg"); err == nil {
+      137        if rtspURL, err := probeRTSP(cameraIP); err == nil {
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 1 line, removed 1 line
+      143      }
+      144    }
+      145  
+      146 -  return fmt.Errorf("no preview source found (tried OBS WebSoc
+          -ket, HTTP snapshots, RTSP)")                                  
+      146 +  return fmt.Errorf("no preview source found (tried NDI, OBS W
+          +ebSocket, HTTP snapshots, RTSP)")                             
+      147  }
+      148  
+      149  // -----------------------------------------------------------
+           ----------------
+
+⏺ Now add the NDI receiver functions. I'll add them between the Start method and
+   the OBS section:
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 112 lines
+      147  }
+      148  
+      149  // -----------------------------------------------------------
+           ----------------
+      150 +// NDI direct capture                                         
+      151 +// -----------------------------------------------------------
+          +----------------                                              
+      152 +                                                              
+      153 +var ndiInitOnce sync.Once                                     
+      154 +var ndiInitErr error                                          
+      155 +                                                              
+      156 +// tryNDI attempts to discover and connect to an NDI source at
+          + the given camera IP.                                         
+      157 +func (p *previewer) tryNDI(cameraIP string) bool {            
+      158 +  ndiInitOnce.Do(func() {                                     
+      159 +    ndiInitErr = gondi.InitLibrary("")                        
+      160 +    if ndiInitErr != nil {                                    
+      161 +      log.Printf("preview: NDI library init failed: %v", ndiIn
+          +itErr)                                                        
+      162 +    }                                                         
+      163 +  })                                                          
+      164 +  if ndiInitErr != nil {                                      
+      165 +    return false                                              
+      166 +  }                                                           
+      167 +                                                              
+      168 +  finder, err := gondi.NewFindInstance(true, "", cameraIP)    
+      169 +  if err != nil {                                             
+      170 +    log.Printf("preview: NDI finder failed: %v", err)         
+      171 +    return false                                              
+      172 +  }                                                           
+      173 +                                                              
+      174 +  // Wait for sources to appear.                              
+      175 +  finder.WaitForSources(5000)                                 
+      176 +  sources := finder.GetCurrentSources()                       
+      177 +                                                              
+      178 +  // Match source by camera IP.                               
+      179 +  var matched *gondi.Source                                   
+      180 +  for _, s := range sources {                                 
+      181 +    if strings.Contains(s.Address(), cameraIP) {              
+      182 +      matched = s                                             
+      183 +      break                                                   
+      184 +    }                                                         
+      185 +  }                                                           
+      186 +  if matched == nil {                                         
+      187 +    finder.Destroy()                                          
+      188 +    log.Printf("preview: no NDI source found at %s (found %d s
+          +ources)", cameraIP, len(sources))                             
+      189 +    return false                                              
+      190 +  }                                                           
+      191 +                                                              
+      192 +  recv, err := gondi.NewRecvInstance(&gondi.NewRecvInstanceSet
+          +tings{                                                        
+      193 +    SourceToConnectTo: matched,                               
+      194 +    ColorFormat:       gondi.RecvColorFormatRGBXRGBA,         
+      195 +    Bandwidth:         gondi.RecvBandwidthLowest,             
+      196 +    AllowVideoFields:  true,                                  
+      197 +    Name:              "camctl-preview",                      
+      198 +  })                                                          
+      199 +  finder.Destroy()                                            
+      200 +  if err != nil {                                             
+      201 +    log.Printf("preview: NDI receiver failed: %v", err)       
+      202 +    return false                                              
+      203 +  }                                                           
+      204 +                                                              
+      205 +  log.Printf("preview: connected to NDI source %q at %s", matc
+          +hed.Name(), matched.Address())                                
+      206 +  ctx, _ := p.start()                                         
+      207 +  go p.captureNDI(ctx, recv)                                  
+      208 +  return true                                                 
+      209 +}                                                             
+      210 +                                                              
+      211 +// captureNDI runs the NDI frame capture loop.                
+      212 +func (p *previewer) captureNDI(ctx context.Context, recv *gond
+          +i.RecvInstance) {                                             
+      213 +  defer recv.Destroy()                                        
+      214 +                                                              
+      215 +  var vf gondi.VideoFrameV2                                   
+      216 +  for {                                                       
+      217 +    select {                                                  
+      218 +    case <-ctx.Done():                                        
+      219 +      return                                                  
+      220 +    default:                                                  
+      221 +    }                                                         
+      222 +                                                              
+      223 +    ft := recv.CaptureV2(&vf, nil, nil, 500)                  
+      224 +    switch ft {                                               
+      225 +    case gondi.FrameTypeVideo:                                
+      226 +      frame := encodeRGBAFrame(vf.Data, int(vf.Xres), int(vf.Y
+          +res), int(vf.LineStride))                                     
+      227 +      recv.FreeVideoV2(&vf)                                   
+      228 +      if frame != nil {                                       
+      229 +        p.mu.Lock()                                           
+      230 +        p.frame = frame                                       
+      231 +        p.mu.Unlock()                                         
+      232 +      }                                                       
+      233 +    case gondi.FrameTypeError:                                
+      234 +      log.Printf("preview: NDI capture error, stopping")      
+      235 +      return                                                  
+      236 +    }                                                         
+      237 +  }                                                           
+      238 +}                                                             
+      239 +                                                              
+      240 +// encodeRGBAFrame converts raw RGBA pixel data to JPEG.      
+      241 +func encodeRGBAFrame(data *byte, width, height, stride int) []
+          +byte {                                                        
+      242 +  if data == nil || width <= 0 || height <= 0 || stride <= 0 {
+      243 +    return nil                                                
+      244 +  }                                                           
+      245 +  size := stride * height                                     
+      246 +  raw := unsafe.Slice(data, size)                             
+      247 +                                                              
+      248 +  img := &image.NRGBA{                                        
+      249 +    Pix:    raw,                                              
+      250 +    Stride: stride,                                           
+      251 +    Rect:   image.Rect(0, 0, width, height),                  
+      252 +  }                                                           
+      253 +                                                              
+      254 +  var buf bytes.Buffer                                        
+      255 +  if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 60})
+          +; err != nil {                                                
+      256 +    return nil                                                
+      257 +  }                                                           
+      258 +  return buf.Bytes()                                          
+      259 +}                                                             
+      260 +                                                              
+      261 +// -----------------------------------------------------------
+          +----------------                                              
+      262  // OBS WebSocket (v5, port 4455)
+      263  // -----------------------------------------------------------
+           ----------------
+      264  
+
+⏺ Now let's build to check for compilation errors:
+
+⏺ Bash(go build ./...)
+  ⎿  (No output)
+
+⏺ Compiles cleanly. Let me verify the final state of the modified section:
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ Everything looks good. Here's what was done:
+
+  ndi/preview.go — Added NDI direct capture as Strategy 1 (shifting OBS to 2,
+  HTTP to 3, RTSP to 4):
+
+  - tryNDI(cameraIP) — Initializes the NDI library (once via sync.Once), creates
+   a finder with the camera IP as extraIPs for fast discovery, waits up to 5s
+  for sources, matches by IP address, creates a low-bandwidth RGBA receiver, and
+   starts the capture goroutine
+  - captureNDI(ctx, recv) — Loops calling CaptureV2 with 500ms timeout, encodes
+  video frames to JPEG, stores in p.frame
+  - encodeRGBAFrame(data, width, height, stride) — Uses unsafe.Slice to create a
+   Go slice from the NDI *byte pointer, wraps it as image.NRGBA, and encodes to
+  JPEG at quality 60
+
+  go.mod — Added github.com/bitfocus/gondi v0.0.2 (+
+  github.com/ebitengine/purego v0.3.2 transitive dep)
+
+  The Previewer interface is unchanged, so no modifications needed to handlers,
+  views, or storage. If NDI discovery fails (no libndi.dylib, camera doesn't
+  output NDI, etc.), it falls through to OBS WebSocket as before.
+
+✻ Sautéed for 2m 2s
+
+❯ I am getting this panic panic: dlsym(0x77e3d410, NDIlib_send_create_v2):      
+symbol not found                                                                
+                                                                                
+goroutine 53 [running]:                                                         
+github.com/ebitengine/purego.RegisterLibFunc({0x107519f40, 0x107829640},        
+0x14000123b28?, {0x106b63725?, 0x0?})                                           
+    /Users/pres/go/pkg/mod/github.com/ebitengine/purego@v0.3.2/func.go:24 +0x60 
+github.com/bitfocus/gondi.InitLibrary({0x0?, 0x104d0492c?})                     
+    /Users/pres/go/pkg/mod/github.com/bitfocus/gondi@v0.0.2/internals.go:100    
++0x140                                                                          
+camctl/ndi.(*previewer).tryNDI.func1()                                          
+    /Users/pres/projs/go/camctl/ndi/preview.go:159 +0x24                        
+
+⏺ The gondi library's InitLibrary eagerly registers all NDI functions (including
+   send functions) even if you only need receive. The installed libndi.dylib
+  v5.0.0 is a runtime-only library that doesn't export send symbols.
+
+  Let me check what symbols are actually available and what gondi is trying to
+  load.
+
+⏺ Bash(nm -gU /usr/local/lib/libndi.dylib 2>/dev/null | grep -i ndilib | head
+      -40)
+  ⎿  0000000000037908 T _NDIlib_destroy
+     0000000000027948 T _NDIlib_find_create
+     0000000000027bec T _NDIlib_find_create2
+     … +23 lines (ctrl+o to expand)
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ The libndi.dylib runtime doesn't export send/routing symbols, but
+  gondi.InitLibrary() eagerly registers all of them. We need to bypass gondi and
+   use purego directly, registering only the find+recv symbols that exist.
+
+  Let me check the exact structs and functions we need from gondi's source.
+
+⏺ Searched for 1 pattern, read 5 files (ctrl+o to expand)
+
+⏺ The best approach is to drop gondi and write minimal NDI bindings using purego
+   directly, registering only the symbols that exist in the runtime dylib. I'll
+  create ndi/ndilib.go for the bindings and update preview.go.
+
+⏺ Write(ndi/ndilib.go)
+  ⎿  Wrote 187 lines to ndi/ndilib.go
+      1 // Minimal NDI bindings via purego — receive-only, no send/routin
+        g symbols required.
+      2 package ndi
+      3 
+      4 import (
+      5         "errors"
+      6         "fmt"
+      7         "runtime"
+      8         "sync"
+      9         "unsafe"
+     … +177 lines (ctrl+o to expand)
+
+⏺ Now update preview.go to remove the gondi import and use our own types:
+
+⏺ Update(ndi/preview.go)
+  ⎿  Removed 1 line
+      24    "time"
+      25    "unsafe"
+      26  
+      27 -  "github.com/bitfocus/gondi"                                  
+      27    "github.com/rohanthewiz/rweb"
+      28  )
+      29  
+
+⏺ Now replace the NDI section in preview.go to use our own types:
+
+⏺ Update(ndi/preview.go)
+  ⎿  Added 17 lines, removed 35 lines
+      149  // NDI direct capture
+      150  // -----------------------------------------------------------
+           ----------------
+      151  
+      152 -var ndiInitOnce sync.Once                                     
+      153 -var ndiInitErr error                                          
+      154 -                                                              
+      152  // tryNDI attempts to discover and connect to an NDI source at
+            the given camera IP.
+      153  func (p *previewer) tryNDI(cameraIP string) bool {
+      154    ndiInitOnce.Do(func() {
+      158 -    ndiInitErr = gondi.InitLibrary("")                        
+      155 +    ndiInitErr = initNDI()                                    
+      156      if ndiInitErr != nil {
+      157        log.Printf("preview: NDI library init failed: %v", ndiIn
+           itErr)
+      158      }
+     ...
+      161      return false
+      162    }
+      163  
+      167 -  finder, err := gondi.NewFindInstance(true, "", cameraIP)    
+      168 -  if err != nil {                                             
+      169 -    log.Printf("preview: NDI finder failed: %v", err)         
+      170 -    return false                                              
+      171 -  }                                                           
+      164 +  sources, destroyFinder := ndiFindSources(cameraIP)          
+      165 +  defer destroyFinder()                                       
+      166  
+      173 -  // Wait for sources to appear.                              
+      174 -  finder.WaitForSources(5000)                                 
+      175 -  sources := finder.GetCurrentSources()                       
+      176 -                                                              
+      167    // Match source by camera IP.
+      178 -  var matched *gondi.Source                                   
+      179 -  for _, s := range sources {                                 
+      180 -    if strings.Contains(s.Address(), cameraIP) {              
+      181 -      matched = s                                             
+      168 +  var matched *ndiSource                                      
+      169 +  for i := range sources {                                    
+      170 +    if strings.Contains(sources[i].Address(), cameraIP) {     
+      171 +      matched = &sources[i]                                   
+      172        break
+      173      }
+      174    }
+      175    if matched == nil {
+      186 -    finder.Destroy()                                          
+      176      log.Printf("preview: no NDI source found at %s (found %d s
+           ources)", cameraIP, len(sources))
+      177      return false
+      178    }
+      179  
+      191 -  recv, err := gondi.NewRecvInstance(&gondi.NewRecvInstanceSet
+          -tings{                                                        
+      192 -    SourceToConnectTo: matched,                               
+      193 -    ColorFormat:       gondi.RecvColorFormatRGBXRGBA,         
+      194 -    Bandwidth:         gondi.RecvBandwidthLowest,             
+      195 -    AllowVideoFields:  true,                                  
+      196 -    Name:              "camctl-preview",                      
+      197 -  })                                                          
+      198 -  finder.Destroy()                                            
+      199 -  if err != nil {                                             
+      200 -    log.Printf("preview: NDI receiver failed: %v", err)       
+      180 +  recv := ndiCreateRecv(matched)                              
+      181 +  if recv == 0 {                                              
+      182 +    log.Printf("preview: NDI receiver creation failed")       
+      183      return false
+      184    }
+      185  
+     ...
+      190  }
+      191  
+      192  // captureNDI runs the NDI frame capture loop.
+      211 -func (p *previewer) captureNDI(ctx context.Context, recv *gond
+          -i.RecvInstance) {                                             
+      212 -  defer recv.Destroy()                                        
+      193 +func (p *previewer) captureNDI(ctx context.Context, recv uintp
+          +tr) {                                                         
+      194 +  defer ndilib_recv_destroy(recv)                             
+      195  
+      214 -  var vf gondi.VideoFrameV2                                   
+      196 +  var vf ndiVideoFrame                                        
+      197    for {
+      198      select {
+      199      case <-ctx.Done():
+     ...
+      201      default:
+      202      }
+      203  
+      222 -    ft := recv.CaptureV2(&vf, nil, nil, 500)                  
+      204 +    ft := ndilib_recv_capture_v2(recv, uintptr(unsafe.Pointer(
+          +&vf)), 0, 0, 500)                                             
+      205      switch ft {
+      224 -    case gondi.FrameTypeVideo:                                
+      206 +    case ndiFrameTypeVideo:                                   
+      207        frame := encodeRGBAFrame(vf.Data, int(vf.Xres), int(vf.Y
+           res), int(vf.LineStride))
+      226 -      recv.FreeVideoV2(&vf)                                   
+      208 +      ndilib_recv_free_video_v2(recv, uintptr(unsafe.Pointer(&
+          +vf)))                                                         
+      209        if frame != nil {
+      210          p.mu.Lock()
+      211          p.frame = frame
+      212          p.mu.Unlock()
+      213        }
+      232 -    case gondi.FrameTypeError:                                
+      214 +    case ndiFrameTypeError:                                   
+      215        log.Printf("preview: NDI capture error, stopping")
+      216        return
+      217      }
+
+⏺ Now remove the gondi dependency and tidy:
+
+⏺ Bash(go build ./... 2>&1)
+  ⎿  (No output)
+
+⏺ Bash(go mod tidy 2>&1)
+  ⎿  (No output)
+
+⏺ Let me verify gondi was removed and only purego remains:
+
+⏺ Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Clean. gondi is gone, only purego remains (direct dependency now). The build
+  succeeds.
+
+  Here's what changed:
+
+  1. Dropped gondi — it eagerly registers all NDI symbols (send, routing) which
+  don't exist in the receive-only libndi.dylib runtime, causing the dlsym panic.
+  2. Created ndi/ndilib.go — minimal NDI bindings using purego directly,
+  registering only the 9 symbols we need (initialize, find, recv). All
+  C-compatible struct layouts are replicated locally.
+  3. Updated ndi/preview.go — uses the local bindings instead of gondi. Same
+  logic, just different types (ndiSource, ndiVideoFrame, raw uintptr receiver
+  handle).
+
+✻ Cogitated for 2m 0s
+
+❯ commit this                                                                   
+
+⏺ Bash(git status)
+  ⎿  On branch master
+     Your branch is up to date with 'origin/master'.
+     … +20 lines (ctrl+o to expand)
+
+⏺ Bash(git diff)
+  ⎿  diff --git a/go.mod b/go.mod
+     index 7dffd4b..80ed452 100644
+     --- a/go.mod
+     … +426 lines (ctrl+o to expand)
+
+⏺ Bash(git log --oneline -5)
+  ⎿  e55620e Replace JSON config storage with DuckDB, fix broken camera rec
+     onnection
+     3a6a7c8 Merge pull request #1 from rohanthewiz/claude/improve-camera-i
+     … +5 lines (ctrl+o to expand)
+
+⏺ There are changes beyond the NDI work (handlers, views, storage, deleted
+  files). I'll only commit the NDI-related files: go.mod, go.sum,
+  ndi/preview.go, and ndi/ndilib.go.
+
+⏺ Bash(git add go.mod go.sum ndi/preview.go ndi/ndilib.go && git commit -m
+      "$(cat <<'EOF'
+      Add NDI direct camera preview as first strategy, bypassing OBS composite…)
+  ⎿  [master 41b2d6f] Add NDI direct camera preview as first strategy, bypa
+     ssing OBS composite
+      Committer: Pres Computer <pres@Mac-mini.local>
+     … +20 lines (ctrl+o to expand)
+
+⏺ Committed as 41b2d6f. Only the NDI-related files were included; the other
+  uncommitted changes (handlers, views, storage, etc.) remain in the working
+  tree.
