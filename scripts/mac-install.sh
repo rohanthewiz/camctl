@@ -399,7 +399,7 @@ import AppKit
 import Foundation
 import WebKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var serverProcess: Process?
@@ -489,6 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         config.websiteDataStore = .default()
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
+        webView.uiDelegate = self
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 800),
@@ -499,6 +500,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         window.center()
         window.title = "$CAMCTL_APP_NAME"
         window.contentView = webView
+    }
+
+    // WKWebView does NOT surface JavaScript alert()/confirm()/prompt() unless the
+    // host implements WKUIDelegate. Without these, confirm() silently returns false,
+    // which swallowed the preset "Save position" confirmation and dropped the command
+    // (movement and label edits work because they never call confirm()). Bridge the
+    // three JS dialogs to native NSAlerts so any in-page dialog behaves correctly.
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "$CAMCTL_APP_NAME"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+        completionHandler()
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "$CAMCTL_APP_NAME"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        completionHandler(alert.runModal() == .alertFirstButtonReturn)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?, initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "$CAMCTL_APP_NAME"
+        alert.informativeText = prompt
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.stringValue = defaultText ?? ""
+        alert.accessoryView = field
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        completionHandler(alert.runModal() == .alertFirstButtonReturn ? field.stringValue : nil)
     }
 
     private func startServer() {
