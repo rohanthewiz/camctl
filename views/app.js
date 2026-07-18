@@ -166,11 +166,40 @@ function presetSet(num) {
 	let labelEl = document.getElementById('preset-label-' + num);
 	let name = (labelEl && labelEl.value) ? '"' + labelEl.value + '"' : 'Preset ' + (num + 1);
 	if (!confirm('Save current camera position to ' + name + '?')) return;
-	postJSON('/api/preset/set', 'num=' + num);
+	postJSON('/api/preset/set', 'num=' + num).then(function(data) {
+		if (!data || data.error) return;
+		showToast('Saved ' + name, 'success');
+		if (labelEl) flashSaved(labelEl);
+	});
+}
+
+// isConfiguredLabel mirrors the server-side highlight rule (views.go): a slot
+// counts as "configured" when its label is non-empty and differs from the
+// default "Preset N".
+function isConfiguredLabel(num, label) {
+	let t = (label || '').trim();
+	return t !== '' && t !== 'Preset ' + (num + 1);
 }
 
 function saveLabel(num, label) {
-	postJSON('/api/preset/label', 'num=' + num + '&label=' + encodeURIComponent(label));
+	let labelEl = document.getElementById('preset-label-' + num);
+	postJSON('/api/preset/label', 'num=' + num + '&label=' + encodeURIComponent(label))
+		.then(function(data) {
+			if (!data || data.error || !labelEl) return;
+			// Update the green "configured" highlight immediately so the operator
+			// sees the change without reloading the page.
+			labelEl.classList.toggle('set', isConfiguredLabel(num, label));
+			flashSaved(labelEl);
+		});
+}
+
+// flashSaved briefly pulses an element bright green to confirm a save landed.
+function flashSaved(el) {
+	el.classList.remove('flash-saved');
+	// Force reflow so the animation restarts even on rapid repeat saves.
+	void el.offsetWidth;
+	el.classList.add('flash-saved');
+	setTimeout(function() { el.classList.remove('flash-saved'); }, 700);
 }
 
 // ---- Camera management ----
