@@ -48,6 +48,11 @@ func NewApp(store *storage.DB) *App {
 
 // RegisterRoutes wires all handlers to the rweb server.
 func (a *App) RegisterRoutes(s *rweb.Server) {
+	// Readiness probe — used by the macOS app wrapper to know when the
+	// server is up before loading the UI; cheaper than rendering the index.
+	s.Get("/health", func(c rweb.Context) error {
+		return c.WriteJSON(map[string]string{"status": "ok"})
+	})
 	s.Get("/", a.handleIndex)
 	s.Post("/api/move", a.handleMove)
 	s.Post("/api/zoom", a.handleZoom)

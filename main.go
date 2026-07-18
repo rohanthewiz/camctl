@@ -36,9 +36,15 @@ func main() {
 
 	app := handlers.NewApp(store)
 
-	// Web server on port 8383 — chosen to avoid common port conflicts
+	// Web server port — 8383 by default (chosen to avoid common port conflicts),
+	// overridable via CAMCTL_PORT so the macOS app wrapper (scripts/mac-install.sh)
+	// or a second instance can pick a port without a rebuild.
+	port := os.Getenv("CAMCTL_PORT")
+	if port == "" {
+		port = "8383"
+	}
 	s := rweb.NewServer(rweb.ServerOptions{
-		Address: ":8383",
+		Address: ":" + port,
 		Verbose: true,
 	})
 
@@ -46,6 +52,6 @@ func main() {
 
 	app.RegisterRoutes(s)
 
-	log.Println("CamCtl running at http://localhost:8383")
+	log.Printf("CamCtl running at http://localhost:%s", port)
 	log.Fatal(s.Run())
 }
