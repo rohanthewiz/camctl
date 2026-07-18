@@ -1,0 +1,38 @@
+# CI: vet + build both tag variants + race-enabled tests.
+#
+# The two builds matter because the codebase compiles two previewers:
+# the default stub (no "ndi" tag) and the full preview subsystem
+# ("-tags ndi"). A change that only builds under one variant has broken
+# an installer path before — both installers now use -tags ndi, but
+# `go build ./...` remains the doc-advertised control-only build.
+#
+# -race requires CGo; DuckDB's Go driver ships prebuilt static libs, so
+# no extra system dependencies are needed on the runner.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build (stub previewer)
+        run: go build ./...
+
+      - name: Build (ndi previewer)
+        run: go build -tags ndi ./...
+
+      - name: Test (race detector)
+        run: go test -race ./...

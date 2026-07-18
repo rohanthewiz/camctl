@@ -166,6 +166,17 @@ func (v ActiveCameraView) Render(b *element.Builder) (x any) {
 	return
 }
 
+// obsPasswordPlaceholder picks the OBS password field's placeholder text.
+// The field itself always renders empty (the stored password must never
+// appear in HTML), so the placeholder is the only signal to the user that
+// a password is already saved and that leaving the field blank keeps it.
+func obsPasswordPlaceholder(storedPassword string) string {
+	if storedPassword != "" {
+		return "saved — leave blank to keep"
+	}
+	return "OBS WebSocket password"
+}
+
 // PreviewView creates the live preview box with a gear icon to toggle
 // a collapsible settings panel for enabling/disabling preview protocols.
 // Implements element.Component so it can be used directly as an R() argument.
@@ -222,9 +233,13 @@ func (v PreviewView) Render(b *element.Builder) (x any) {
 				),
 				b.DivClass("settings-row").R(
 					b.Label("for", "pv-obs-password").T("Password"),
+					// The stored password is never echoed into the page — HTML
+					// source is visible to anyone with page access and may be
+					// cached. A blank submission keeps the saved password
+					// (see handlePreviewSettings), so the placeholder tells the
+					// user whether one is already stored.
 					b.Input("type", "password", "id", "pv-obs-password",
-						"placeholder", "OBS WebSocket password",
-						"value", ps.OBSWSPassword).R(),
+						"placeholder", obsPasswordPlaceholder(ps.OBSWSPassword)).R(),
 				),
 			),
 

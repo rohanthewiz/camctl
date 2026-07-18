@@ -43,7 +43,11 @@ git clone --depth 1 "$REPO_URL" "$TMPDIR/camctl-src"
 
 info "Building camctl..."
 cd "$TMPDIR/camctl-src"
-go build -o "$TMPDIR/$BINARY_NAME" .
+# The "ndi" tag compiles the preview subsystem (NDI/OBS/HTTP/RTSP strategies);
+# without it the binary is control-only with no in-app preview. NDI itself is
+# loaded dynamically at runtime via purego, so the tag adds no build deps.
+# Matches the flags used by mac-install.sh.
+go build -trimpath -tags ndi -ldflags "-s -w" -o "$TMPDIR/$BINARY_NAME" .
 
 # --- Install ---
 

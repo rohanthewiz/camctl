@@ -106,15 +106,11 @@ func (d *DB) createTables() error {
 }
 
 func (d *DB) seedPresets() error {
-	var count int
-	if err := d.db.QueryRow("SELECT COUNT(*) FROM presets").Scan(&count); err != nil {
-		return err
-	}
-	if count >= presetCount {
-		return nil
-	}
-	// Insert any missing preset slots.
-	for i := count; i < presetCount; i++ {
+	// Top up every slot individually with INSERT OR IGNORE. Existing rows
+	// are not necessarily a contiguous prefix — JSON migration can import
+	// sparse slot numbers (e.g. only 0 and 3) — so a count-based starting
+	// index would leave gaps unseeded.
+	for i := range presetCount {
 		_, err := d.db.Exec(
 			"INSERT OR IGNORE INTO presets (number, label) VALUES (?, ?)",
 			i, fmt.Sprintf("Preset %d", i+1),

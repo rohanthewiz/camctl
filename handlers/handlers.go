@@ -358,11 +358,16 @@ func (a *App) handleCameraRemove(c rweb.Context) error {
 	if err := a.Store.RemoveCamera(label); err != nil {
 		return serr.Wrap(err, "camera remove failed")
 	}
+	// Snapshot settings under the read lock — handleSettings mutates them
+	// concurrently from other requests.
+	a.mu.RLock()
+	settings := a.Settings
+	a.mu.RUnlock()
 	return c.WriteJSON(settingsResponse{
-		Connected: a.Settings.Connected,
-		Label:     a.Settings.CameraLabel,
-		IP:        a.Settings.CameraIP,
-		Port:      a.Settings.CameraPort,
+		Connected: settings.Connected,
+		Label:     settings.CameraLabel,
+		IP:        settings.CameraIP,
+		Port:      settings.CameraPort,
 		Cameras:   a.savedCamerasJSON(),
 	})
 }
@@ -388,20 +393,23 @@ func (a *App) handleCameraEdit(c rweb.Context) error {
 		return c.WriteJSON(map[string]string{"error": err.Error()})
 	}
 
-	// If the active camera was edited, update settings to match
+	// If the active camera was edited, update settings to match.
+	// Snapshot while still holding the lock so the response reflects
+	// a consistent view even if another request mutates settings.
 	a.mu.Lock()
 	if a.Settings.CameraLabel == oldLabel {
 		a.Settings.CameraLabel = label
 		a.Settings.CameraIP = ip
 		a.Settings.CameraPort = port
 	}
+	settings := a.Settings
 	a.mu.Unlock()
 
 	return c.WriteJSON(settingsResponse{
-		Connected: a.Settings.Connected,
-		Label:     a.Settings.CameraLabel,
-		IP:        a.Settings.CameraIP,
-		Port:      a.Settings.CameraPort,
+		Connected: settings.Connected,
+		Label:     settings.CameraLabel,
+		IP:        settings.CameraIP,
+		Port:      settings.CameraPort,
 		Cameras:   a.savedCamerasJSON(),
 	})
 }
@@ -435,6 +443,18 @@ func (a *App) handlePreviewSettings(c rweb.Context) error {
 		EnableRTSP:    c.Request().FormValue("enable_rtsp") == "true",
 		OBSWSHost:     strings.TrimSpace(c.Request().FormValue("obs_ws_host")),
 		OBSWSPassword: c.Request().FormValue("obs_ws_password"),
+	}
+
+	// The settings form never echoes the stored password back (see
+	// obsPasswordPlaceholder in views), so a blank field is the normal
+	// "unchanged" case — preserve the saved value rather than wiping it.
+	// Trade-off: a password can't be cleared from the UI, only replaced;
+	// acceptable since a stale password is simply ignored when OBS auth
+	// is disabled.
+	if ps.OBSWSPassword == "" {
+		if existing, err := a.Store.GetPreviewSettings(); err == nil {
+			ps.OBSWSPassword = existing.OBSWSPassword
+		}
 	}
 
 	if err := a.Store.UpdatePreviewSettings(ps); err != nil {
@@ -481,7 +501,7 @@ func (a *App) handlePreview(c rweb.Context) error {
 		}
 
 		frame := a.NDI.Frame()
-		if frame == nil || len(frame) == 0 {
+		if len(frame) == 0 {
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
