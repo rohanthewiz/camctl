@@ -43,8 +43,18 @@ func main() {
 	if port == "" {
 		port = "8383"
 	}
+
+	// Bind address — loopback by default. The app has no authentication and the
+	// settings page manages camera/OBS credentials, so exposing it to the LAN
+	// must be an explicit opt-in: set CAMCTL_BIND=0.0.0.0 (or a specific
+	// interface IP) to allow control from phones/tablets on the network.
+	bindAddr := os.Getenv("CAMCTL_BIND")
+	if bindAddr == "" {
+		bindAddr = "127.0.0.1"
+	}
+
 	s := rweb.NewServer(rweb.ServerOptions{
-		Address: ":" + port,
+		Address: bindAddr + ":" + port,
 		Verbose: true,
 	})
 
@@ -52,6 +62,6 @@ func main() {
 
 	app.RegisterRoutes(s)
 
-	log.Printf("CamCtl running at http://localhost:%s", port)
+	log.Printf("CamCtl running at http://%s:%s (set CAMCTL_BIND=0.0.0.0 for LAN access)", bindAddr, port)
 	log.Fatal(s.Run())
 }
