@@ -1,0 +1,45 @@
+// Command dbcheck opens a copy of a real camctl database through storage.Open
+// and prints the resulting cameras and their per-camera presets. Used to verify
+// the global-presets -> per-camera migration against live data.
+package main
+
+import (
+	"camctl/storage"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+)
+
+func main() {
+	db, err := storage.Open(os.Args[1])
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	// Optional label:ip seeds stand up a multi-camera database without real
+	// hardware, since the app only persists a camera on a successful connect.
+	for _, seed := range os.Args[2:] {
+		parts := strings.SplitN(seed, ":", 2)
+		if err := db.UpsertCamera(storage.Camera{Label: parts[0], IP: parts[1], Port: 52381}); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	cams, err := db.AllCameras()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("cameras: %d\n", len(cams))
+	for _, c := range cams {
+		fmt.Printf("  %s (%s:%d)\n", c.Label, c.IP, c.Port)
+		presets, err := db.AllPresets(c.Label)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, p := range presets {
+			fmt.Printf("     %d: %s\n", p.Number, p.Label)
+		}
+	}
+}

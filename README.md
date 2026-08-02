@@ -11,7 +11,8 @@ persist in an embedded DuckDB database under `~/.camctl/`.
 ## Features
 
 - **Pan / tilt / zoom** control with press-and-hold movement
-- **Presets** — save, recall, and label up to camera-supported preset slots
+- **Presets** — save, recall, and label up to camera-supported preset slots,
+  scoped per camera
 - **Multiple cameras** — save several cameras and switch between them
 - **Live preview** in the browser (MJPEG), sourced from the first strategy
   that works, in order:
@@ -67,6 +68,10 @@ Then open <http://localhost:8383>.
 2. Connect. The app verifies the camera responds before reporting success.
 3. Use the arrow pad to pan/tilt, the zoom buttons to zoom, and the numbered
    slots to save/recall presets. Presets can be labeled.
+   Presets belong to a single camera — the positions live in the camera itself,
+   and the labels are stored per camera — so each camera you add starts with its
+   own empty set. The name beside the "Presets" heading shows which camera the
+   slots on screen belong to, and the grid swaps when you switch cameras.
 4. Optional: open preview settings to choose preview sources and configure
    the OBS WebSocket host/password if you use the OBS strategy.
 

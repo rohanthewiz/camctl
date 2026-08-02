@@ -1,0 +1,40 @@
+// Command fakecam is a stand-in VISCA-over-IP camera for UI testing: it echoes
+// every UDP datagram back, which is all camctl's Connect() needs to consider a
+// camera alive. Listens on one port per argument.
+package main
+
+import (
+	"log"
+	"net"
+	"os"
+	"sync"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	for _, port := range os.Args[1:] {
+		wg.Add(1)
+		go func(port string) {
+			defer wg.Done()
+			addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:"+port)
+			if err != nil {
+				log.Fatal(err)
+			}
+			conn, err := net.ListenUDP("udp", addr)
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Printf("fakecam listening on %s", addr)
+			buf := make([]byte, 512)
+			for {
+				n, from, err := conn.ReadFromUDP(buf)
+				if err != nil {
+					return
+				}
+				// Echo back — any reply satisfies the liveness probe.
+				_, _ = conn.WriteToUDP(buf[:n], from)
+			}
+		}(port)
+	}
+	wg.Wait()
+}

@@ -26,8 +26,10 @@ func (d *DB) migrateCamerasJSON(path string) {
 		return
 	}
 
+	// upsertCameraRow, not UpsertCamera: preset provisioning must wait until
+	// after fanOutLegacyPresets has had a chance to apply the old shared labels.
 	for _, cam := range cams {
-		if err := d.UpsertCamera(cam); err != nil {
+		if err := d.upsertCameraRow(cam); err != nil {
 			log.Printf("storage: migrate camera %q: %v", cam.Label, err)
 		}
 	}
@@ -39,6 +41,10 @@ func (d *DB) migrateCamerasJSON(path string) {
 	}
 }
 
+// migratePresetsJSON imports the old presets.json, which predates per-camera
+// presets and therefore holds a single global set of labels. The rows land in
+// the legacy holding table and Open's fanOutLegacyPresets copies them onto each
+// saved camera — the same path taken by an old DuckDB presets table.
 func (d *DB) migratePresetsJSON(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -51,9 +57,18 @@ func (d *DB) migratePresetsJSON(path string) {
 		return
 	}
 
+	if _, err := d.db.Exec(`
+		CREATE TABLE IF NOT EXISTS ` + legacyPresetsTable + ` (
+			number INTEGER PRIMARY KEY,
+			label  TEXT NOT NULL
+		)`); err != nil {
+		log.Printf("storage: create %s: %v", legacyPresetsTable, err)
+		return
+	}
+
 	for _, p := range presets {
 		_, err := d.db.Exec(
-			"INSERT OR REPLACE INTO presets (number, label) VALUES (?, ?)",
+			"INSERT OR REPLACE INTO "+legacyPresetsTable+" (number, label) VALUES (?, ?)",
 			p.Number, p.Label,
 		)
 		if err != nil {

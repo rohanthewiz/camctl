@@ -258,7 +258,40 @@ h2 {
 	transition: width 0.15s;
 }
 
-/* ---- Presets: 3-per-row grid ---- */
+/* ---- Presets ---- */
+
+/* Header row naming the camera these presets belong to. Presets are
+   per-camera, so this is the operator's confirmation that the grid below
+   changed when they switched cameras. */
+.presets-header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+	/* The h2's own bottom margin moves up to the flex row so the heading and
+	   camera name stay on a shared baseline without crowding the grid. */
+	margin-bottom: 12px;
+}
+.presets-header h2 {
+	margin-bottom: 0;
+}
+.presets-camera {
+	font-size: 0.8rem;
+	color: var(--accent);
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 55%;
+}
+/* Dimmed + italic when no camera is selected: the slots are inert until one is. */
+.presets-camera.none {
+	color: #666;
+	font-weight: 400;
+	font-style: italic;
+}
+
+/* 3-per-row grid */
 .preset-grid {
 	display: grid;
 	grid-template-columns: repeat(3, 1fr);

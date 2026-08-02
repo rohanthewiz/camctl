@@ -46,6 +46,22 @@ func NewApp(store *storage.DB) *App {
 	}
 }
 
+// formValue reads a form field and returns a copy of it.
+//
+// rweb hands back strings that alias the connection's request buffer — an
+// unsafe zero-copy []byte-to-string view (see rweb's b2s/GetPostValue). That
+// buffer is reused for the next request on the connection, so any value the app
+// keeps past the current handler silently mutates into whatever arrived later:
+// a saved camera IP of "127.0.0.1" would turn into the first nine bytes of some
+// unrelated form body.
+//
+// Everything stored in App.Settings or used as a preset lookup key outlives its
+// request, so all reads go through here rather than leaving the distinction to
+// be re-derived at each call site.
+func formValue(c rweb.Context, key string) string {
+	return strings.Clone(c.Request().FormValue(key))
+}
+
 // RegisterRoutes wires all handlers to the rweb server.
 func (a *App) RegisterRoutes(s *rweb.Server) {
 	// Readiness probe — used by the macOS app wrapper to know when the
@@ -81,10 +97,9 @@ func (a *App) handleIndex(c rweb.Context) error {
 		camItems[i] = views.CameraItem{Label: cam.Label, IP: cam.IP, Port: cam.Port}
 	}
 
-	presets, err := a.Store.AllPresets()
-	if err != nil {
-		log.Printf("AllPresets: %v", err)
-	}
+	// Presets are per-camera, so the grid shows the active camera's slots.
+	// With nothing selected this yields placeholder labels (see AllPresets).
+	presets := a.presetsFor(settings.CameraLabel)
 
 	previewSettings, err := a.Store.GetPreviewSettings()
 	if err != nil {
@@ -93,7 +108,7 @@ func (a *App) handleIndex(c rweb.Context) error {
 
 	data := views.PageData{
 		Settings:        settings,
-		Presets:          presets,
+		Presets:         presets,
 		Cameras:         camItems,
 		PreviewSettings: previewSettings,
 	}
@@ -105,18 +120,18 @@ func (a *App) handleIndex(c rweb.Context) error {
 // Optional "panSpeed" (1–24) and "tiltSpeed" (1–23) override the defaults,
 // enabling client-side speed curves to ramp movement over time.
 func (a *App) handleMove(c rweb.Context) error {
-	direction := c.Request().FormValue("direction")
+	direction := formValue(c, "direction")
 
 	// Parse optional speed overrides — the JS ramping logic sends these
 	// with increasing values while a D-pad button is held down.
 	panSpeed := defaultPanSpeed
 	tiltSpeed := defaultTiltSpeed
-	if ps := c.Request().FormValue("panSpeed"); ps != "" {
+	if ps := formValue(c, "panSpeed"); ps != "" {
 		if v, err := strconv.Atoi(ps); err == nil && v >= 1 && v <= 0x18 {
 			panSpeed = byte(v)
 		}
 	}
-	if ts := c.Request().FormValue("tiltSpeed"); ts != "" {
+	if ts := formValue(c, "tiltSpeed"); ts != "" {
 		if v, err := strconv.Atoi(ts); err == nil && v >= 1 && v <= 0x17 {
 			tiltSpeed = byte(v)
 		}
@@ -157,8 +172,8 @@ func (a *App) handleMove(c rweb.Context) error {
 // handleZoom processes zoom in/out/stop commands.
 // Expects form params "action" (in/out/stop) and optional "speed" (1–7).
 func (a *App) handleZoom(c rweb.Context) error {
-	action := c.Request().FormValue("action")
-	speedStr := c.Request().FormValue("speed")
+	action := formValue(c, "action")
+	speedStr := formValue(c, "speed")
 
 	// Parse speed, default to 4 (moderate)
 	speed := byte(4)
@@ -197,7 +212,7 @@ func (a *App) handleZoom(c rweb.Context) error {
 // handlePresetRecall recalls a saved camera position.
 // Expects form param "num" (0–5 for our 6 presets).
 func (a *App) handlePresetRecall(c rweb.Context) error {
-	num, err := strconv.Atoi(c.Request().FormValue("num"))
+	num, err := strconv.Atoi(formValue(c, "num"))
 	if err != nil || num < 0 || num > 5 {
 		return c.WriteJSON(map[string]string{"error": "invalid preset number"})
 	}
@@ -219,7 +234,7 @@ func (a *App) handlePresetRecall(c rweb.Context) error {
 // handlePresetSet saves the current camera position to a preset slot.
 // Expects form param "num" (0–5).
 func (a *App) handlePresetSet(c rweb.Context) error {
-	num, err := strconv.Atoi(c.Request().FormValue("num"))
+	num, err := strconv.Atoi(formValue(c, "num"))
 	if err != nil || num < 0 || num > 5 {
 		return c.WriteJSON(map[string]string{"error": "invalid preset number"})
 	}
@@ -238,19 +253,42 @@ func (a *App) handlePresetSet(c rweb.Context) error {
 	return c.WriteJSON(map[string]string{"status": "ok"})
 }
 
-// handlePresetLabel updates a preset's display label and persists it.
-// Expects form params "num" (0–5) and "label" (text).
+// handlePresetLabel updates a preset's display label and persists it against
+// the active camera. Expects form params "num" (0–5) and "label" (text).
+//
+// The camera is taken from server-side state rather than a client-supplied
+// field: the label the operator is editing is by definition the one on screen,
+// which is the camera the server considers active.
 func (a *App) handlePresetLabel(c rweb.Context) error {
-	num, err := strconv.Atoi(c.Request().FormValue("num"))
+	num, err := strconv.Atoi(formValue(c, "num"))
 	if err != nil || num < 0 || num > 5 {
 		return c.WriteJSON(map[string]string{"error": "invalid preset number"})
 	}
 
-	label := c.Request().FormValue("label")
-	if err := a.Store.UpdatePresetLabel(num, label); err != nil {
+	a.mu.RLock()
+	cameraLabel := a.Settings.CameraLabel
+	a.mu.RUnlock()
+
+	if cameraLabel == "" {
+		return c.WriteJSON(map[string]string{"error": "select a camera before naming presets"})
+	}
+
+	label := formValue(c, "label")
+	if err := a.Store.UpdatePresetLabel(cameraLabel, num, label); err != nil {
 		return serr.Wrap(err, "preset label update failed")
 	}
 	return c.WriteJSON(map[string]string{"status": "ok"})
+}
+
+// presetsFor loads a camera's preset labels, falling back to placeholders so a
+// storage error degrades to an unnamed-but-usable grid instead of an empty one.
+func (a *App) presetsFor(cameraLabel string) []storage.Preset {
+	presets, err := a.Store.AllPresets(cameraLabel)
+	if err != nil {
+		log.Printf("AllPresets(%q): %v", cameraLabel, err)
+		return storage.DefaultPresets()
+	}
+	return presets
 }
 
 // cameraJSON represents a saved camera in the settings response.
@@ -260,9 +298,16 @@ type cameraJSON struct {
 	Port  int    `json:"port"`
 }
 
+// presetJSON represents one preset slot in the settings response.
+type presetJSON struct {
+	Number int    `json:"number"`
+	Label  string `json:"label"`
+}
+
 // settingsResponse is the JSON shape returned after a connection attempt.
 // Includes the full saved-cameras list so the client can update the sidebar
-// without a page reload.
+// without a page reload, plus the active camera's presets — those are
+// per-camera, so switching cameras has to repaint the preset grid.
 type settingsResponse struct {
 	Connected bool         `json:"connected"`
 	Label     string       `json:"label"`
@@ -270,6 +315,17 @@ type settingsResponse struct {
 	Port      int          `json:"port"`
 	Error     string       `json:"error,omitempty"`
 	Cameras   []cameraJSON `json:"cameras"`
+	Presets   []presetJSON `json:"presets"`
+}
+
+// presetsJSON loads a camera's presets in the JSON response format.
+func (a *App) presetsJSON(cameraLabel string) []presetJSON {
+	raw := a.presetsFor(cameraLabel)
+	out := make([]presetJSON, len(raw))
+	for i, p := range raw {
+		out[i] = presetJSON{Number: p.Number, Label: p.Label}
+	}
+	return out
 }
 
 // handleSettings connects to a camera and saves it to the camera list when a
@@ -277,9 +333,9 @@ type settingsResponse struct {
 // new camera additions from the add-camera form.
 // Expects form params "label" (required for saving), "ip", and "port".
 func (a *App) handleSettings(c rweb.Context) error {
-	label := strings.TrimSpace(c.Request().FormValue("label"))
-	ip := strings.TrimSpace(c.Request().FormValue("ip"))
-	portStr := c.Request().FormValue("port")
+	label := strings.TrimSpace(formValue(c, "label"))
+	ip := strings.TrimSpace(formValue(c, "ip"))
+	portStr := formValue(c, "port")
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
@@ -308,6 +364,7 @@ func (a *App) handleSettings(c rweb.Context) error {
 			Port:      port,
 			Error:     connectErr.Error(),
 			Cameras:   a.savedCamerasJSON(),
+			Presets:   a.presetsJSON(label),
 		})
 	}
 
@@ -324,6 +381,8 @@ func (a *App) handleSettings(c rweb.Context) error {
 	}()
 
 	// Persist the camera to the saved list when a label is provided.
+	// UpsertCamera also provisions this camera's own preset slots, so the
+	// presets read below reflect the new camera rather than the previous one.
 	if label != "" {
 		_ = a.Store.UpsertCamera(storage.Camera{Label: label, IP: ip, Port: port})
 	}
@@ -334,6 +393,7 @@ func (a *App) handleSettings(c rweb.Context) error {
 		IP:        ip,
 		Port:      port,
 		Cameras:   a.savedCamerasJSON(),
+		Presets:   a.presetsJSON(label),
 	})
 }
 
@@ -354,7 +414,7 @@ func (a *App) savedCamerasJSON() []cameraJSON {
 // handleCameraRemove removes a camera from the saved list.
 // Expects form param "label".
 func (a *App) handleCameraRemove(c rweb.Context) error {
-	label := c.Request().FormValue("label")
+	label := formValue(c, "label")
 	if err := a.Store.RemoveCamera(label); err != nil {
 		return serr.Wrap(err, "camera remove failed")
 	}
@@ -369,16 +429,17 @@ func (a *App) handleCameraRemove(c rweb.Context) error {
 		IP:        settings.CameraIP,
 		Port:      settings.CameraPort,
 		Cameras:   a.savedCamerasJSON(),
+		Presets:   a.presetsJSON(settings.CameraLabel),
 	})
 }
 
 // handleCameraEdit updates a saved camera's label, IP, or port.
 // Expects form params "old_label", "label", "ip", "port".
 func (a *App) handleCameraEdit(c rweb.Context) error {
-	oldLabel := c.Request().FormValue("old_label")
-	label := c.Request().FormValue("label")
-	ip := c.Request().FormValue("ip")
-	portStr := c.Request().FormValue("port")
+	oldLabel := formValue(c, "old_label")
+	label := formValue(c, "label")
+	ip := formValue(c, "ip")
+	portStr := formValue(c, "port")
 
 	if oldLabel == "" || label == "" || ip == "" {
 		return c.WriteJSON(map[string]string{"error": "label, ip are required"})
@@ -411,6 +472,8 @@ func (a *App) handleCameraEdit(c rweb.Context) error {
 		IP:        settings.CameraIP,
 		Port:      settings.CameraPort,
 		Cameras:   a.savedCamerasJSON(),
+		// A rename re-keys the camera's presets, so re-read them under the new label.
+		Presets: a.presetsJSON(settings.CameraLabel),
 	})
 }
 
@@ -437,12 +500,12 @@ func (a *App) buildPreviewOptions() ndi.PreviewOptions {
 // which strategies are tried without reconnecting the camera.
 func (a *App) handlePreviewSettings(c rweb.Context) error {
 	ps := storage.PreviewSettings{
-		EnableNDI:     c.Request().FormValue("enable_ndi") == "true",
-		EnableOBS:     c.Request().FormValue("enable_obs") == "true",
-		EnableHTTP:    c.Request().FormValue("enable_http") == "true",
-		EnableRTSP:    c.Request().FormValue("enable_rtsp") == "true",
-		OBSWSHost:     strings.TrimSpace(c.Request().FormValue("obs_ws_host")),
-		OBSWSPassword: c.Request().FormValue("obs_ws_password"),
+		EnableNDI:     formValue(c, "enable_ndi") == "true",
+		EnableOBS:     formValue(c, "enable_obs") == "true",
+		EnableHTTP:    formValue(c, "enable_http") == "true",
+		EnableRTSP:    formValue(c, "enable_rtsp") == "true",
+		OBSWSHost:     strings.TrimSpace(formValue(c, "obs_ws_host")),
+		OBSWSPassword: formValue(c, "obs_ws_password"),
 	}
 
 	// The settings form never echoes the stored password back (see

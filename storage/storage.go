@@ -3,12 +3,17 @@ package storage
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"path/filepath"
 
 	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 const presetCount = 6
+
+// legacyPresetsTable is the holding area for pre-per-camera preset rows during
+// the schema upgrade. See migratePresetsSchema and fanOutLegacyPresets.
+const legacyPresetsTable = "presets_legacy"
 
 // DB wraps a DuckDB connection for camera and preset persistence.
 type DB struct {
@@ -23,9 +28,31 @@ type Camera struct {
 }
 
 // Preset holds a camera preset slot number and its user-defined label.
+//
+// Presets are scoped to a camera: the label is keyed by (camera_label, number)
+// in the DB. The positions themselves live in the camera's own memory — VISCA
+// preset set/recall address slots on the device — so slot 3 on "Stage Left" and
+// slot 3 on "Balcony" are genuinely different shots and must not share a name.
 type Preset struct {
 	Number int
 	Label  string
+}
+
+// defaultPresetLabel is the placeholder name for an unconfigured slot.
+// Slots are 0-based internally but presented 1-based to the operator.
+func defaultPresetLabel(num int) string {
+	return fmt.Sprintf("Preset %d", num+1)
+}
+
+// DefaultPresets returns a full set of placeholder slots. Used to render the
+// preset grid when no camera is selected — there is no camera to key real
+// labels by, but the UI still needs six cards to lay out.
+func DefaultPresets() []Preset {
+	out := make([]Preset, presetCount)
+	for i := range presetCount {
+		out[i] = Preset{Number: i, Label: defaultPresetLabel(i)}
+	}
+	return out
 }
 
 // PreviewSettings stores which preview strategies are enabled
@@ -61,10 +88,22 @@ func Open(dbPath string) (*DB, error) {
 	}
 	d.migrateJSON(dir)
 
-	// Seed default presets if the table is empty.
-	if err := d.seedPresets(); err != nil {
+	// Hand the old global preset labels to the saved cameras. This runs after
+	// migrateJSON so that both sources of legacy rows — an old DB and an old
+	// presets.json — are fanned out in one pass, and after the cameras table is
+	// populated so there is something to fan out to.
+	if err := d.fanOutLegacyPresets(); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("storage: seed presets: %w", err)
+		return nil, fmt.Errorf("storage: migrate presets to per-camera: %w", err)
+	}
+
+	// Drop preset rows whose camera no longer exists. Presets are seeded lazily
+	// on read, so a camera that was typed into the add form but never saved (a
+	// failed connection, say) can leave rows behind; without a cascading foreign
+	// key this sweep is what keeps the table from accumulating them.
+	if err := d.pruneOrphanPresets(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("storage: prune orphan presets: %w", err)
 	}
 
 	// Seed default preview settings (single-row config).
@@ -88,10 +127,6 @@ func (d *DB) createTables() error {
 			ip    TEXT NOT NULL,
 			port  INTEGER NOT NULL
 		);
-		CREATE TABLE IF NOT EXISTS presets (
-			number INTEGER PRIMARY KEY,
-			label  TEXT NOT NULL
-		);
 		CREATE TABLE IF NOT EXISTS preview_settings (
 			id              INTEGER PRIMARY KEY DEFAULT 1,
 			enable_ndi      BOOLEAN NOT NULL DEFAULT true,
@@ -102,18 +137,147 @@ func (d *DB) createTables() error {
 			obs_ws_password TEXT NOT NULL DEFAULT ''
 		);
 	`)
+	if err != nil {
+		return err
+	}
+
+	// Get the old single-set presets table out of the way before creating the
+	// per-camera one — CREATE TABLE IF NOT EXISTS would silently keep the old
+	// shape and every later query would fail on the missing column.
+	if err := d.migratePresetsSchema(); err != nil {
+		return err
+	}
+
+	// No FOREIGN KEY to cameras: DuckDB does not support ON DELETE CASCADE, and
+	// an un-cascaded FK would block camera deletion. The camera operations below
+	// keep preset rows in step by hand (delete on remove, re-key on rename).
+	_, err = d.db.Exec(`
+		CREATE TABLE IF NOT EXISTS presets (
+			camera_label TEXT    NOT NULL,
+			number       INTEGER NOT NULL,
+			label        TEXT    NOT NULL,
+			PRIMARY KEY (camera_label, number)
+		);
+	`)
 	return err
 }
 
-func (d *DB) seedPresets() error {
-	// Top up every slot individually with INSERT OR IGNORE. Existing rows
-	// are not necessarily a contiguous prefix — JSON migration can import
-	// sparse slot numbers (e.g. only 0 and 3) — so a count-based starting
-	// index would leave gaps unseeded.
+// migratePresetsSchema upgrades a pre-existing presets table keyed by slot
+// number alone to the per-camera schema. Under the old shape every camera read
+// the same six labels, so adding a second camera showed the first camera's
+// preset names.
+//
+//	presets(number PK, label)  ->  presets_legacy(number PK, label)
+//	                               presets(camera_label, number PK, label)
+//
+// The rows are parked rather than dropped; fanOutLegacyPresets copies them to
+// each saved camera once the camera list is known. Renaming (instead of
+// ALTER TABLE) keeps the new table definition in one place and lets every other
+// query assume the new schema unconditionally.
+func (d *DB) migratePresetsSchema() error {
+	cols, err := d.tableColumns("presets")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 || cols["camera_label"] {
+		return nil // no table yet, or already migrated
+	}
+
+	// A leftover holding table from an interrupted earlier migration would
+	// collide with the rename, so clear it first.
+	if _, err := d.db.Exec("DROP TABLE IF EXISTS " + legacyPresetsTable); err != nil {
+		return err
+	}
+	if _, err := d.db.Exec("ALTER TABLE presets RENAME TO " + legacyPresetsTable); err != nil {
+		return err
+	}
+	log.Printf("storage: upgrading presets to per-camera labels")
+	return nil
+}
+
+// fanOutLegacyPresets copies the parked global preset labels onto every saved
+// camera, then drops the holding table. INSERT OR IGNORE means a camera that
+// already has its own labels keeps them.
+//
+// With no cameras saved there is nothing to attach the labels to — the slots
+// were unreachable anyway, since recall requires a connection — so the holding
+// table is simply dropped and each camera starts from placeholder names.
+func (d *DB) fanOutLegacyPresets() error {
+	exists, err := d.tableExists(legacyPresetsTable)
+	if err != nil || !exists {
+		return err
+	}
+
+	cams, err := d.AllCameras()
+	if err != nil {
+		return err
+	}
+	for _, cam := range cams {
+		_, err := d.db.Exec(
+			"INSERT OR IGNORE INTO presets (camera_label, number, label) "+
+				"SELECT ?, number, label FROM "+legacyPresetsTable,
+			cam.Label,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	if _, err := d.db.Exec("DROP TABLE " + legacyPresetsTable); err != nil {
+		return err
+	}
+	log.Printf("storage: applied legacy preset labels to %d camera(s)", len(cams))
+	return nil
+}
+
+// pruneOrphanPresets deletes preset rows that no saved camera claims.
+func (d *DB) pruneOrphanPresets() error {
+	_, err := d.db.Exec(
+		"DELETE FROM presets WHERE camera_label NOT IN (SELECT label FROM cameras)")
+	return err
+}
+
+// tableColumns returns the column names of a table as a set.
+// An empty (non-nil) map means the table does not exist.
+func (d *DB) tableColumns(table string) (map[string]bool, error) {
+	rows, err := d.db.Query(
+		"SELECT column_name FROM information_schema.columns WHERE table_name = ?", table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
+}
+
+func (d *DB) tableExists(table string) (bool, error) {
+	var n int
+	err := d.db.QueryRow(
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", table).Scan(&n)
+	return n > 0, err
+}
+
+// ensurePresets tops up a camera's slots with placeholder labels.
+//
+// Seeding is lazy — done on read and on camera insert — rather than a separate
+// provisioning step, so cameras that predate this schema (or arrive via JSON
+// migration) also get a full set. Each slot is inserted individually with
+// INSERT OR IGNORE because existing rows are not necessarily a contiguous
+// prefix: JSON migration can import sparse slot numbers (e.g. only 0 and 3),
+// which a count-based starting index would leave with gaps.
+func (d *DB) ensurePresets(cameraLabel string) error {
 	for i := range presetCount {
 		_, err := d.db.Exec(
-			"INSERT OR IGNORE INTO presets (number, label) VALUES (?, ?)",
-			i, fmt.Sprintf("Preset %d", i+1),
+			"INSERT OR IGNORE INTO presets (camera_label, number, label) VALUES (?, ?, ?)",
+			cameraLabel, i, defaultPresetLabel(i),
 		)
 		if err != nil {
 			return err
@@ -144,7 +308,23 @@ func (d *DB) AllCameras() ([]Camera, error) {
 }
 
 // UpsertCamera inserts a new camera or updates the existing entry with the same label.
+// The camera's own preset slots are provisioned at the same time so a freshly
+// added camera starts with its own placeholder labels rather than inheriting
+// another camera's names.
 func (d *DB) UpsertCamera(cam Camera) error {
+	if err := d.upsertCameraRow(cam); err != nil {
+		return err
+	}
+	return d.ensurePresets(cam.Label)
+}
+
+// upsertCameraRow writes just the camera row, without provisioning presets.
+//
+// Kept separate for the JSON migration path: seeding placeholder labels there
+// would occupy the slots that fanOutLegacyPresets is about to fill, and its
+// INSERT OR IGNORE would then skip the user's real names. Lazy seeding on first
+// read still guarantees a full set afterwards.
+func (d *DB) upsertCameraRow(cam Camera) error {
 	_, err := d.db.Exec(
 		"INSERT OR REPLACE INTO cameras (label, ip, port) VALUES (?, ?, ?)",
 		cam.Label, cam.IP, cam.Port,
@@ -192,20 +372,61 @@ func (d *DB) UpdateCamera(oldLabel string, cam Camera) error {
 	if err != nil {
 		return err
 	}
+
+	// Presets are keyed by camera label, so a rename has to carry them across in
+	// the same transaction — otherwise the renamed camera would silently fall
+	// back to placeholder labels and the old names would linger as orphans.
+	// Any stale rows already sitting under the new label (from a camera deleted
+	// outside this code path) are cleared first so the re-key can't hit the
+	// composite primary key.
+	if _, err := tx.Exec("DELETE FROM presets WHERE camera_label = ?", cam.Label); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		"UPDATE presets SET camera_label = ? WHERE camera_label = ?", cam.Label, oldLabel,
+	); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
-// RemoveCamera deletes the camera with the given label (no-op if not found).
+// RemoveCamera deletes the camera with the given label along with its preset
+// labels (no-op if not found). The cascade is done by hand because DuckDB
+// foreign keys cannot use ON DELETE CASCADE.
 func (d *DB) RemoveCamera(label string) error {
-	_, err := d.db.Exec("DELETE FROM cameras WHERE label = ?", label)
-	return err
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM cameras WHERE label = ?", label); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM presets WHERE camera_label = ?", label); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // --- Preset operations ---
 
-// AllPresets returns all presets ordered by slot number.
-func (d *DB) AllPresets() ([]Preset, error) {
-	rows, err := d.db.Query("SELECT number, label FROM presets ORDER BY number")
+// AllPresets returns one camera's presets ordered by slot number, seeding any
+// missing slots with placeholder labels first.
+//
+// An empty cameraLabel means "no camera selected" — there is nothing to key
+// labels by, so a placeholder set is returned rather than an error, letting the
+// UI render its grid before the first connection.
+func (d *DB) AllPresets(cameraLabel string) ([]Preset, error) {
+	if cameraLabel == "" {
+		return DefaultPresets(), nil
+	}
+	if err := d.ensurePresets(cameraLabel); err != nil {
+		return nil, err
+	}
+
+	rows, err := d.db.Query(
+		"SELECT number, label FROM presets WHERE camera_label = ? ORDER BY number", cameraLabel)
 	if err != nil {
 		return nil, err
 	}
@@ -222,12 +443,21 @@ func (d *DB) AllPresets() ([]Preset, error) {
 	return out, rows.Err()
 }
 
-// UpdatePresetLabel changes the label for a preset by its slot number.
-func (d *DB) UpdatePresetLabel(num int, label string) error {
+// UpdatePresetLabel changes the label of one slot on one camera.
+//
+// Upsert rather than UPDATE: the row is normally seeded already, but this keeps
+// the write correct if a label edit is the first thing that touches a camera.
+func (d *DB) UpdatePresetLabel(cameraLabel string, num int, label string) error {
+	if cameraLabel == "" {
+		return fmt.Errorf("storage: preset labels require a camera")
+	}
 	if num < 0 || num >= presetCount {
 		return fmt.Errorf("storage: invalid preset number %d", num)
 	}
-	_, err := d.db.Exec("UPDATE presets SET label = ? WHERE number = ?", label, num)
+	_, err := d.db.Exec(
+		"INSERT OR REPLACE INTO presets (camera_label, number, label) VALUES (?, ?, ?)",
+		cameraLabel, num, label,
+	)
 	return err
 }
 

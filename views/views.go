@@ -83,7 +83,7 @@ func RenderPage(data PageData) string {
 					// Right column — cameras (primary), then presets
 					b.DivClass("col").R(
 						CamerasView{Settings: data.Settings, Cameras: data.Cameras}.Render(b),
-						PresetsView{Presets: data.Presets}.Render(b),
+						PresetsView{Presets: data.Presets, CameraLabel: data.Settings.CameraLabel}.Render(b),
 					),
 				),
 			),
@@ -374,44 +374,77 @@ func (v ZoomSectionView) Render(b *element.Builder) (x any) {
 
 // PresetsView creates 6 presets in a 3-per-row grid.
 // Each preset card has an editable label, a green GO button, and a muted Save button.
+//
+// Presets belong to a single camera — both the labels here and the positions in
+// the camera's own memory — so the heading names the camera they apply to.
+// Without that, an operator switching cameras has no signal that the grid just
+// changed underneath them.
 // Implements element.Component so it can be used directly as an R() argument.
 type PresetsView struct {
-	Presets []storage.Preset
+	Presets     []storage.Preset
+	CameraLabel string
 }
 
 func (v PresetsView) Render(b *element.Builder) (x any) {
 	b.DivClass("section").R(
-		b.H2().T("Presets"),
-		b.DivClass("preset-grid").R(
+		b.DivClass("presets-header").R(
+			b.H2().T("Presets"),
+			b.Span("id", "presets-camera", "class", presetsCameraClass(v.CameraLabel)).
+				T(presetsCameraText(v.CameraLabel)),
+		),
+		b.Div("id", "preset-grid", "class", "preset-grid").R(
 			b.Wrap(func() {
-				for _, p := range v.Presets {
-					// Presets with user-assigned labels get a highlight color;
-					// default "Preset N" labels are dimmed to visually separate
-					// configured slots from empty ones.
-					labelClass := "preset-label"
-					if p.Label != fmt.Sprintf("Preset %d", p.Number+1) {
-						labelClass = "preset-label set"
-					}
-					b.DivClass("preset-card").R(
-						b.Input("type", "text", "class", labelClass,
-							"id", fmt.Sprintf("preset-label-%d", p.Number),
-							"value", p.Label,
-							"onchange", fmt.Sprintf("saveLabel(%d, this.value)", p.Number),
-						).R(),
-						b.DivClass("preset-actions").R(
-							b.Button("class", "preset-btn go",
-								"onclick", fmt.Sprintf("presetRecall(%d)", p.Number),
-							).T("GO"),
-							b.Button("class", "preset-btn save",
-								"onclick", fmt.Sprintf("presetSet(%d)", p.Number),
-							).T("Save"),
-						),
-					)
-				}
+				RenderPresetCards(b, v.Presets)
 			}),
 		),
 	)
 	return
+}
+
+// RenderPresetCards emits the preset card markup. Split out of PresetsView so
+// the initial page render and any future partial re-render share one definition
+// of a card; the client-side equivalent lives in updatePresets (app.js).
+func RenderPresetCards(b *element.Builder, presets []storage.Preset) {
+	for _, p := range presets {
+		// Presets with user-assigned labels get a highlight color;
+		// default "Preset N" labels are dimmed to visually separate
+		// configured slots from empty ones.
+		labelClass := "preset-label"
+		if p.Label != fmt.Sprintf("Preset %d", p.Number+1) {
+			labelClass = "preset-label set"
+		}
+		b.DivClass("preset-card").R(
+			b.Input("type", "text", "class", labelClass,
+				"id", fmt.Sprintf("preset-label-%d", p.Number),
+				"value", p.Label,
+				"onchange", fmt.Sprintf("saveLabel(%d, this.value)", p.Number),
+			).R(),
+			b.DivClass("preset-actions").R(
+				b.Button("class", "preset-btn go",
+					"onclick", fmt.Sprintf("presetRecall(%d)", p.Number),
+				).T("GO"),
+				b.Button("class", "preset-btn save",
+					"onclick", fmt.Sprintf("presetSet(%d)", p.Number),
+				).T("Save"),
+			),
+		)
+	}
+}
+
+// presetsCameraText labels the preset grid with its owning camera, or explains
+// why the slots are inert when there is no camera selected.
+func presetsCameraText(cameraLabel string) string {
+	if cameraLabel == "" {
+		return "select a camera"
+	}
+	return cameraLabel
+}
+
+func presetsCameraClass(cameraLabel string) string {
+	if cameraLabel == "" {
+		return "presets-camera none"
+	}
+	return "presets-camera"
 }
 
 // CamerasView creates the camera management section: saved cameras list

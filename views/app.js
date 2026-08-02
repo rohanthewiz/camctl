@@ -202,6 +202,46 @@ function flashSaved(el) {
 	setTimeout(function() { el.classList.remove('flash-saved'); }, 700);
 }
 
+// escapeAttr makes a stored string safe to interpolate into a double-quoted
+// HTML attribute. Preset labels are free-form operator input, so a stray quote
+// would otherwise break out of value="..." and inject markup.
+// Quotes must be handled explicitly — textContent/innerHTML escapes & < > only.
+function escapeAttr(s) {
+	let div = document.createElement('div');
+	div.textContent = s;
+	return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// updatePresets repaints the preset grid for the camera that just became
+// active. Presets are per-camera — both the labels stored here and the
+// positions in the camera itself — so switching cameras must swap the whole
+// grid rather than leave the previous camera's names on screen.
+// Mirrors RenderPresetCards in views.go.
+function updatePresets(presets, cameraLabel) {
+	let nameEl = document.getElementById('presets-camera');
+	if (nameEl) {
+		nameEl.textContent = cameraLabel ? cameraLabel : 'select a camera';
+		nameEl.className = cameraLabel ? 'presets-camera' : 'presets-camera none';
+	}
+
+	let grid = document.getElementById('preset-grid');
+	if (!grid || !presets) return;
+
+	let html = '';
+	for (let p of presets) {
+		// Dim the default "Preset N" placeholders so configured slots stand out.
+		let cls = (p.label === 'Preset ' + (p.number + 1)) ? 'preset-label' : 'preset-label set';
+		html += '<div class="preset-card">' +
+			'<input type="text" class="' + cls + '" id="preset-label-' + p.number +
+			'" value="' + escapeAttr(p.label) + '" onchange="saveLabel(' + p.number + ', this.value)">' +
+			'<div class="preset-actions">' +
+			'<button class="preset-btn go" onclick="presetRecall(' + p.number + ')">GO</button>' +
+			'<button class="preset-btn save" onclick="presetSet(' + p.number + ')">Save</button>' +
+			'</div></div>';
+	}
+	grid.innerHTML = html;
+}
+
 // ---- Camera management ----
 
 // Toggle the add-camera form open/closed.
@@ -289,6 +329,9 @@ function saveEditCamera() {
 		if (data && !data.error) {
 			closeEditModal();
 			updateCameraList(data.cameras, data.ip, data.port, data.connected);
+			// A rename re-keys that camera's presets; refresh so the heading
+			// and labels track the new name.
+			updatePresets(data.presets, data.label);
 			if (data.connected) {
 				updateStatus(true, data.label, data.ip, data.port);
 			}
@@ -305,6 +348,8 @@ function removeCamera(label, event) {
 	.then(function(data) {
 		if (data) {
 			updateCameraList(data.cameras, data.ip, data.port, data.connected);
+			// The deleted camera's preset labels are gone with it.
+			updatePresets(data.presets, data.label);
 		}
 	});
 }
@@ -330,6 +375,10 @@ function doConnect(label, ip, port) {
 			btn.disabled = false;
 			btn.textContent = 'Add & Connect';
 		}
+		// Repaint presets on both outcomes — the server switches its active
+		// camera even when the connection fails, so the grid must follow.
+		updatePresets(data.presets, data.label);
+
 		if (data.connected) {
 			updateStatus(true, data.label, data.ip, data.port);
 			updateCameraList(data.cameras, data.ip, data.port, true);
