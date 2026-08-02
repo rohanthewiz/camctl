@@ -201,6 +201,27 @@ On a fresh app start nothing is connected, so the grid shows placeholders and
 "select a camera" until a camera is clicked. Previously it always showed the one
 global label set. Label editing while disconnected is rejected with a toast.
 
+## Rebase onto concurrent work
+
+`origin/master` had moved ahead by three commits (`80abe9d`, `b92f502`,
+`4732656` — Mac app preset save feedback + WKUIDelegate), touching `views/app.js`
+and `views/styles.css`. Rebased; git auto-merged, but two semantic overlaps
+needed hand-fixing:
+
+- The incoming commit factored the "is this slot configured?" highlight rule into
+  `isConfiguredLabel(num, label)` in app.js. My `updatePresets` had its own
+  inline copy of that rule — switched to call `isConfiguredLabel` so the repaint
+  and `saveLabel` can't drift.
+- That new JS function's comment says it mirrors the server rule in views.go, but
+  views.go only compared against `"Preset N"` and did not treat an empty label as
+  unconfigured. Added `isConfiguredLabel(num, label)` to views.go (trimmed,
+  non-empty, not the placeholder) and used it in `RenderPresetCards`, so the two
+  sides actually agree — otherwise a slot would change appearance between a live
+  repaint and the next page load.
+
+Re-ran the full live verification after the rebase; all per-camera behavior and
+the highlight classes still correct.
+
 ## Outstanding
 
 - No LICENSE file (carried over from the previous session).

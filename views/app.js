@@ -229,8 +229,9 @@ function updatePresets(presets, cameraLabel) {
 
 	let html = '';
 	for (let p of presets) {
-		// Dim the default "Preset N" placeholders so configured slots stand out.
-		let cls = (p.label === 'Preset ' + (p.number + 1)) ? 'preset-label' : 'preset-label set';
+		// Dim the default "Preset N" placeholders so configured slots stand out —
+		// via isConfiguredLabel so the repaint and saveLabel share one rule.
+		let cls = isConfiguredLabel(p.number, p.label) ? 'preset-label set' : 'preset-label';
 		html += '<div class="preset-card">' +
 			'<input type="text" class="' + cls + '" id="preset-label-' + p.number +
 			'" value="' + escapeAttr(p.label) + '" onchange="saveLabel(' + p.number + ', this.value)">' +

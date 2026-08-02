@@ -410,7 +410,7 @@ func RenderPresetCards(b *element.Builder, presets []storage.Preset) {
 		// default "Preset N" labels are dimmed to visually separate
 		// configured slots from empty ones.
 		labelClass := "preset-label"
-		if p.Label != fmt.Sprintf("Preset %d", p.Number+1) {
+		if isConfiguredLabel(p.Number, p.Label) {
 			labelClass = "preset-label set"
 		}
 		b.DivClass("preset-card").R(
@@ -429,6 +429,17 @@ func RenderPresetCards(b *element.Builder, presets []storage.Preset) {
 			),
 		)
 	}
+}
+
+// isConfiguredLabel reports whether a slot carries a real, operator-assigned
+// name — non-empty and different from the "Preset N" placeholder. Only those get
+// the highlight color, so a glance distinguishes set slots from empty ones.
+//
+// The client-side twin is isConfiguredLabel in app.js; the two must agree, or a
+// slot would change appearance between a live repaint and the next page load.
+func isConfiguredLabel(num int, label string) bool {
+	trimmed := strings.TrimSpace(label)
+	return trimmed != "" && trimmed != fmt.Sprintf("Preset %d", num+1)
 }
 
 // presetsCameraText labels the preset grid with its owning camera, or explains
