@@ -222,8 +222,27 @@ needed hand-fixing:
 Re-ran the full live verification after the rebase; all per-camera behavior and
 the highlight classes still correct.
 
+## Commits (all pushed to `origin/master`)
+
+| Commit | Summary |
+| --- | --- |
+| `c30920d` | Scope presets per camera; fix rweb form-value buffer aliasing |
+| `98dd378` | Share one configured-label rule between views.go and app.js (+ this doc) |
+| `0e31db7` | Track `.cats-todo` task list |
+
+`.cats-todo/todos.json` is now tracked at the user's request. It holds one open
+item: *move the storage backend to `github.com/rohanthewiz/bytdb`, updating the
+Mac installer with it.*
+
 ## Outstanding
 
+- **`bytdb` migration** (`.cats-todo`) — note that this session reshaped the
+  DuckDB schema substantially: composite-key `presets (camera_label, number)`,
+  the `presets_legacy` fan-out migration, `information_schema` probing for the
+  schema upgrade, and hand-rolled cascades on camera rename/delete (DuckDB has no
+  `ON DELETE CASCADE`). All of that needs porting, and whether bytdb offers
+  transactions matters for `UpdateCamera`/`RemoveCamera`, which rely on them to
+  keep camera and preset rows consistent.
 - No LICENSE file (carried over from the previous session).
 - The rweb aliasing issue is worked around app-side; upstream `rweb` still
   returns buffer-aliased strings from `FormValue`.
