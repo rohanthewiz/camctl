@@ -2,7 +2,7 @@
 #
 # mac-install.sh — Install (or update) CamCtl as a native macOS app.
 #
-# Pulls the latest master branch into ~/.camctl/src, ensures Go >= 1.25.5 is
+# Pulls the latest master branch into ~/.camctl/src, ensures Go >= 1.26.1 is
 # available (auto-installing a private copy under ~/.local/go if needed),
 # builds camctl with NDI preview support, then creates ~/Applications/CamCtl.app
 # with a small Swift/WebKit wrapper.
@@ -12,7 +12,11 @@
 #
 # WARNING: this script owns ~/.camctl/src. Re-running it will `git reset --hard`
 # that directory to origin/master — do not put local edits there. (Your data in
-# ~/.camctl itself — camctl.db — is untouched.)
+# ~/.camctl itself — camctl.bytdb — is untouched.)
+#
+# Upgrading from a camctl that stored data in DuckDB: a one-time conversion of
+# ~/.camctl/camctl.db to ~/.camctl/camctl.bytdb runs automatically. The old file
+# is read and left in place, never modified.
 #
 # Usage:
 #   ./scripts/mac-install.sh
@@ -21,7 +25,7 @@
 # Env overrides:
 #   CAMCTL_REPO_URL    git remote   (default: https://github.com/rohanthewiz/camctl.git)
 #   CAMCTL_SRC_DIR     repo dir     (default: $HOME/.camctl/src)
-#   CAMCTL_GO_VERSION  Go to fetch  (default: 1.25.5)
+#   CAMCTL_GO_VERSION  Go to fetch  (default: 1.26.1)
 #   CAMCTL_GO_DIR      Go install   (default: $HOME/.local/go)
 #   CAMCTL_APP_DIR     app dir      (default: $HOME/Applications)
 #   CAMCTL_APP_NAME    app name     (default: CamCtl)
@@ -31,7 +35,7 @@ set -euo pipefail
 
 CAMCTL_REPO_URL="${CAMCTL_REPO_URL:-https://github.com/rohanthewiz/camctl.git}"
 CAMCTL_SRC_DIR="${CAMCTL_SRC_DIR:-$HOME/.camctl/src}"
-CAMCTL_GO_VERSION="${CAMCTL_GO_VERSION:-1.25.5}"
+CAMCTL_GO_VERSION="${CAMCTL_GO_VERSION:-1.26.1}"
 CAMCTL_GO_DIR="${CAMCTL_GO_DIR:-$HOME/.local/go}"
 CAMCTL_APP_DIR="${CAMCTL_APP_DIR:-$HOME/Applications}"
 CAMCTL_APP_NAME="${CAMCTL_APP_NAME:-CamCtl}"
@@ -94,8 +98,10 @@ require_git() {
   die "git not found. Install with: xcode-select --install"
 }
 
-# swiftc compiles the app wrapper; clang (same package) is needed because the
-# DuckDB driver uses CGo. One xcode-select install covers both.
+# swiftc compiles the app wrapper. camctl itself is pure Go since the storage
+# backend moved to bytdb, so nothing in the app build needs a C toolchain; clang
+# (same xcode-select package) is only used by the one-time DuckDB conversion in
+# migrate_legacy_db, and only when an old database is actually present.
 require_swiftc() {
   if command -v swiftc >/dev/null 2>&1; then return 0; fi
   die "swiftc not found. Install Xcode Command Line Tools with: xcode-select --install"
@@ -224,14 +230,52 @@ build_camctl() {
   # -tags ndi compiles the real previewer (purego dlopen of libndi at runtime).
   # It degrades gracefully when the NDI SDK isn't installed, so it is always
   # safe to build in — omitting it would silently ship a stub preview.
+  #
+  # CGO_ENABLED=0 is both a size win and a guard: storage is pure-Go bytdb now,
+  # so anything that reintroduces a CGo dependency to the app should fail the
+  # build here rather than quietly re-adding a compiler requirement.
   info "building camctl ($build_id)"
   ( cd "$CAMCTL_SRC_DIR" && \
-    "$GO_BIN" build -trimpath -tags ndi \
+    CGO_ENABLED=0 "$GO_BIN" build -trimpath -tags ndi \
       -ldflags "-s -w" \
       -o camctl . )
   [ -x "$CAMCTL_SRC_DIR/camctl" ] || die "build reported success but $CAMCTL_SRC_DIR/camctl is missing"
   ok "built $CAMCTL_SRC_DIR/camctl"
   CAMCTL_BUILD_ID="$build_id"
+}
+
+# ---- legacy database conversion --------------------------------------------
+
+# migrate_legacy_db converts a DuckDB-era ~/.camctl/camctl.db to the bytdb
+# database camctl now reads. It is a no-op unless the old file exists and the
+# new one does not, so re-running the installer never touches live data.
+#
+# The conversion is deliberately non-fatal: a fresh install has nothing to
+# convert, and an operator whose old database cannot be read is better served by
+# a working app with an empty camera list plus a warning than by a failed
+# install. The old file is only read, so a failed attempt loses nothing and can
+# be retried by hand.
+migrate_legacy_db() {
+  local data_dir legacy target
+  data_dir="$(dirname "$CAMCTL_SRC_DIR")"
+  legacy="$data_dir/camctl.db"
+  target="$data_dir/camctl.bytdb"
+
+  [ -f "$legacy" ] || return 0
+  if [ -f "$target" ]; then
+    return 0
+  fi
+
+  info "converting legacy DuckDB database to bytdb"
+  # The DuckDB reader needs CGo; this is the only step in the installer that
+  # does, which is why it runs on demand rather than as part of the app build.
+  if ( cd "$CAMCTL_SRC_DIR" && CGO_ENABLED=1 "$GO_BIN" run ./cmd/dbmigrate \
+         -from "$legacy" -to "$target" ); then
+    ok "converted $legacy -> $target (original kept)"
+  else
+    warn "could not convert $legacy; camctl will start with an empty camera list"
+    warn "your old data is still there — retry with: cd $CAMCTL_SRC_DIR && go run ./cmd/dbmigrate"
+  fi
 }
 
 # ---- app icon --------------------------------------------------------------
@@ -636,6 +680,7 @@ main() {
   sync_repo
   resolve_go
   build_camctl
+  migrate_legacy_db
   install_macos_app
 
   printf '\n'
@@ -645,7 +690,7 @@ main() {
   printf '  Go:   %s (%s)\n' "$GO_VERSION" "$GO_SOURCE"
   printf '\nOpen %s%s.app%s from Finder, Spotlight, or the Dock.\n' "$C_GREEN" "$CAMCTL_APP_NAME" "$C_RESET"
   printf 'Logs: ~/Library/Logs/CamCtl/camctl.log\n'
-  printf 'Data: ~/.camctl/camctl.db\n'
+  printf 'Data: ~/.camctl/camctl.bytdb\n'
   printf '\nRe-run this installer any time to update to the latest master.\n'
 }
 

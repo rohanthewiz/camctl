@@ -44,7 +44,7 @@ func (d *DB) migrateCamerasJSON(path string) {
 // migratePresetsJSON imports the old presets.json, which predates per-camera
 // presets and therefore holds a single global set of labels. The rows land in
 // the legacy holding table and Open's fanOutLegacyPresets copies them onto each
-// saved camera — the same path taken by an old DuckDB presets table.
+// saved camera — the same path taken by a legacy single-set presets table.
 func (d *DB) migratePresetsJSON(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -57,18 +57,23 @@ func (d *DB) migratePresetsJSON(path string) {
 		return
 	}
 
-	if _, err := d.db.Exec(`
-		CREATE TABLE IF NOT EXISTS ` + legacyPresetsTable + ` (
+	// The holding table may already exist — an old DuckDB-era presets table
+	// parked by migratePresetsSchema lands under the same name — so both this
+	// create and the writes below have to tolerate what is already there.
+	err = d.ensureTable(legacyPresetsTable, `
+		CREATE TABLE `+legacyPresetsTable+` (
 			number INTEGER PRIMARY KEY,
 			label  TEXT NOT NULL
-		)`); err != nil {
+		)`)
+	if err != nil {
 		log.Printf("storage: create %s: %v", legacyPresetsTable, err)
 		return
 	}
 
 	for _, p := range presets {
 		_, err := d.db.Exec(
-			"INSERT OR REPLACE INTO "+legacyPresetsTable+" (number, label) VALUES (?, ?)",
+			`INSERT INTO `+legacyPresetsTable+` (number, label) VALUES ($1, $2)
+			 ON CONFLICT (number) DO UPDATE SET label = excluded.label`,
 			p.Number, p.Label,
 		)
 		if err != nil {

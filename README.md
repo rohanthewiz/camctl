@@ -6,7 +6,9 @@ Point your browser at a local page and get pan/tilt/zoom controls, position
 presets, and a live video preview — no vendor app required.
 
 Written in Go with a minimal dependency footprint. Camera settings and presets
-persist in an embedded DuckDB database under `~/.camctl/`.
+persist in an embedded [bytdb](https://github.com/rohanthewiz/bytdb) database at
+`~/.camctl/camctl.bytdb`. bytdb is pure Go, so camctl builds with
+`CGO_ENABLED=0` and needs no C toolchain.
 
 ## Features
 
@@ -46,6 +48,8 @@ curl -fsSL https://raw.githubusercontent.com/rohanthewiz/camctl/master/scripts/i
 
 ### From source
 
+Requires Go 1.26.1+ (the floor set by the bytdb storage engine).
+
 ```sh
 git clone https://github.com/rohanthewiz/camctl.git
 cd camctl
@@ -59,6 +63,24 @@ stub previewer is used and in-app preview is disabled entirely, so build with
 `-tags ndi` unless you specifically want a control-only binary.
 
 Then open <http://localhost:8383>.
+
+### Upgrading from a DuckDB-era install
+
+camctl used to keep its data in DuckDB at `~/.camctl/camctl.db`. Storage now
+uses bytdb at `~/.camctl/camctl.bytdb`. The two file formats are unrelated, so
+the old database is converted rather than opened:
+
+```sh
+go run ./cmd/dbmigrate          # ~/.camctl/camctl.db -> ~/.camctl/camctl.bytdb
+```
+
+Both installers run this automatically when they find an old database and no new
+one, so most people never need to. The old file is only read — it is left in
+place, and you can delete it once camctl looks right. Re-running the converter
+refuses to overwrite an existing `camctl.bytdb` unless you pass `-force`.
+
+`cmd/dbmigrate` is the only part of the project that uses DuckDB (and therefore
+CGo); keeping it out of the app is what lets camctl ship as a pure-Go binary.
 
 ## Usage
 
@@ -77,7 +99,9 @@ Then open <http://localhost:8383>.
 
 ## Configuration
 
-All configuration is via environment variables; state lives in `~/.camctl/`.
+All configuration is via environment variables; state lives in `~/.camctl/`
+(`camctl.bytdb` holds cameras, preset labels, and preview settings — the only
+file worth backing up).
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -93,10 +117,17 @@ documented at the top of `scripts/mac-install.sh`.
 ## Development
 
 ```sh
-go build ./...        # stub previewer (no NDI runtime needed)
+go build ./...                                  # stub previewer (no NDI runtime needed)
 go build -tags ndi ./...
+CGO_ENABLED=0 go build -tags ndi -o camctl .    # how the installers build it
 go test -race ./...
 ```
+
+The app is pure Go and CI builds it with `CGO_ENABLED=0` to keep it that way —
+if a change adds a CGo dependency to camctl itself, that step is what fails.
+Note that `./...` is wider than the app: it also covers `cmd/dbmigrate`, whose
+DuckDB driver does use CGo, so `go build ./...` and `go test -race ./...` still
+want a C toolchain (`-race` requires one regardless).
 
 Project layout:
 
@@ -105,5 +136,6 @@ Project layout:
 - `views/` — HTML generation ([element](https://github.com/rohanthewiz/element)), JS, CSS
 - `visca/` — VISCA-over-IP client (UDP framing + camera commands)
 - `ndi/` — preview strategies (NDI via purego, OBS WebSocket, HTTP, RTSP)
-- `storage/` — DuckDB persistence (cameras, presets, preview settings)
+- `storage/` — bytdb persistence (cameras, presets, preview settings)
+- `cmd/dbmigrate/` — one-time converter for pre-bytdb (DuckDB) databases
 - `scripts/` — install scripts

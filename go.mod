@@ -1,13 +1,14 @@
 module camctl
 
-go 1.25.5
+go 1.26.1
 
 require (
 	github.com/duckdb/duckdb-go/v2 v2.10500.0
 	github.com/ebitengine/purego v0.3.2
+	github.com/rohanthewiz/bytdb v0.8.0
 	github.com/rohanthewiz/element v0.5.5-0.20260204132123-bceae1a2e28b
 	github.com/rohanthewiz/rweb v0.1.23-0.20260223044131-478fc988801e
-	github.com/rohanthewiz/serr v1.2.21-0.20260210012051-ba62e01024d8
+	github.com/rohanthewiz/serr v1.4.0
 )
 
 require (
@@ -25,6 +26,8 @@ require (
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
+	github.com/rohanthewiz/btypedb v0.7.0 // indirect
+	github.com/tidwall/btype v0.3.0 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/mod v0.32.0 // indirect

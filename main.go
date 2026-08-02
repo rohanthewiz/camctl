@@ -25,10 +25,14 @@ func main() {
 		log.Fatalf("failed to change to data directory %s: %v", dataDir, err)
 	}
 
-	// Initialize DuckDB storage — creates camctl.db on first run,
+	// Initialize bytdb storage — creates camctl.bytdb on first run,
 	// migrates any existing cameras.json / presets.json automatically.
 	// DB is created in the current directory (~/.camctl/).
-	store, err := storage.Open("camctl.db")
+	//
+	// The filename deliberately differs from the DuckDB-era camctl.db: the two
+	// formats are unrelated, so the old file is left alone for cmd/dbmigrate to
+	// convert rather than being opened and overwritten.
+	store, err := storage.Open("camctl.bytdb")
 	if err != nil {
 		log.Fatalf("failed to initialize storage: %v", err)
 	}

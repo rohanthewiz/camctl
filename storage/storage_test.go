@@ -4,16 +4,18 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // openTestDB creates a DB in a fresh temp dir. Each test gets its own
-// directory so DuckDB file locks and JSON-migration side effects can't
-// leak between tests.
+// directory because bytdb takes a database file for itself — one path is one
+// engine per process — and so JSON-migration side effects can't leak between
+// tests.
 func openTestDB(t *testing.T) (*DB, string) {
 	t.Helper()
 	dir := t.TempDir()
-	d, err := Open(filepath.Join(dir, "test.db"))
+	d, err := Open(filepath.Join(dir, "test.bytdb"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -67,7 +69,7 @@ func TestOpenSeedsDefaults(t *testing.T) {
 // must not duplicate presets or reset user data.
 func TestReopenIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
+	dbPath := filepath.Join(dir, "test.bytdb")
 
 	d, err := Open(dbPath)
 	if err != nil {
@@ -97,6 +99,77 @@ func TestReopenIsIdempotent(t *testing.T) {
 	}
 	if presets[2].Label != "Wide Shot" {
 		t.Errorf("preset 2 label = %q, want %q (user edit lost on reopen)", presets[2].Label, "Wide Shot")
+	}
+}
+
+// TestOrphanPresetsPrunedOnReopen covers Open's sweep for preset rows no camera
+// claims. Reading a camera's presets seeds them, so simply typing a name into
+// the add form and failing to connect leaves rows behind.
+//
+// It also pins the SQL semantics the sweep leans on: the delete filters with
+// NOT IN over a subquery, and with no cameras saved that subquery is empty —
+// which must match every row rather than none.
+func TestOrphanPresetsPrunedOnReopen(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.bytdb")
+
+	d, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	// "Ghost" is never saved as a camera, but reading its presets seeds six rows.
+	if _, err := d.AllPresets("Ghost"); err != nil {
+		t.Fatalf("AllPresets: %v", err)
+	}
+	if err := d.UpdatePresetLabel("Ghost", 0, "Nowhere"); err != nil {
+		t.Fatalf("UpdatePresetLabel: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen with no cameras at all — the empty-subquery case.
+	d2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	var n int
+	if err := d2.db.QueryRow("SELECT COUNT(*) FROM presets").Scan(&n); err != nil {
+		t.Fatalf("counting presets: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("%d orphan preset row(s) survived a reopen with no cameras, want 0", n)
+	}
+
+	// And the same sweep must spare a camera that is genuinely saved.
+	if err := d2.UpsertCamera(Camera{Label: "Real", IP: "10.0.0.1", Port: 52381}); err != nil {
+		t.Fatalf("UpsertCamera: %v", err)
+	}
+	if err := d2.UpdatePresetLabel("Real", 0, "Keeper"); err != nil {
+		t.Fatalf("UpdatePresetLabel: %v", err)
+	}
+	if _, err := d2.AllPresets("Ghost"); err != nil { // orphan rows again
+		t.Fatalf("AllPresets: %v", err)
+	}
+	if err := d2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	d3, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("third Open: %v", err)
+	}
+	defer d3.Close()
+
+	if got := mustPresets(t, d3, "Real")[0].Label; got != "Keeper" {
+		t.Errorf("saved camera's slot 0 = %q, want %q — the sweep took a live row", got, "Keeper")
+	}
+	if err := d3.db.QueryRow(
+		"SELECT COUNT(*) FROM presets WHERE camera_label = $1", "Ghost").Scan(&n); err != nil {
+		t.Fatalf("counting ghost presets: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("%d orphan row(s) survived alongside a real camera, want 0", n)
 	}
 }
 
@@ -158,22 +231,27 @@ func TestPresetsAreScopedPerCamera(t *testing.T) {
 // point, and the holding table is cleaned up so it can't re-apply later.
 func TestLegacyGlobalPresetsMigrate(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
+	dbPath := filepath.Join(dir, "test.bytdb")
 
-	// Build a database in the old shape by hand.
-	raw, err := sql.Open("duckdb", dbPath)
+	// Build a database in the old shape by hand. bytdb parses one statement per
+	// Exec, so the seed runs as a list rather than a single semicolon-separated
+	// block.
+	raw, err := sql.Open("bytdb", dbPath)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
-	_, err = raw.Exec(`
-		CREATE TABLE cameras (label TEXT PRIMARY KEY, ip TEXT NOT NULL, port INTEGER NOT NULL);
-		CREATE TABLE presets (number INTEGER PRIMARY KEY, label TEXT NOT NULL);
-		INSERT INTO cameras VALUES ('Main', '10.0.0.1', 52381), ('Side', '10.0.0.2', 52381);
-		INSERT INTO presets VALUES (0, 'Pulpit'), (1, 'Choir');
-	`)
-	if err != nil {
-		t.Fatalf("seed legacy schema: %v", err)
+	for _, stmt := range []string{
+		`CREATE TABLE cameras (label TEXT PRIMARY KEY, ip TEXT NOT NULL, port INTEGER NOT NULL)`,
+		`CREATE TABLE presets (number INTEGER PRIMARY KEY, label TEXT NOT NULL)`,
+		`INSERT INTO cameras VALUES ('Main', '10.0.0.1', 52381), ('Side', '10.0.0.2', 52381)`,
+		`INSERT INTO presets VALUES (0, 'Pulpit'), (1, 'Choir')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("seed legacy schema (%s): %v", stmt, err)
+		}
 	}
+	// The file has to be released before storage.Open can take it: bytdb gives
+	// one process one engine per path.
 	if err := raw.Close(); err != nil {
 		t.Fatalf("close legacy db: %v", err)
 	}
@@ -215,6 +293,48 @@ func TestLegacyGlobalPresetsMigrate(t *testing.T) {
 	if exists {
 		t.Errorf("%s still present after migration", legacyPresetsTable)
 	}
+}
+
+// TestRejectsLegacyDuckDBFile guards the one way the backend switch could
+// destroy data. bytdb reads a DuckDB file as a torn write-ahead-log tail,
+// truncates it, and reports a healthy empty database — so without this check
+// pointing camctl at the old camctl.db would look like "all my cameras are
+// gone" and then overwrite the file that still held them.
+func TestRejectsLegacyDuckDBFile(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "camctl.db")
+
+	// DuckDB's header is an 8-byte checksum followed by the literal "DUCK".
+	header := append(make([]byte, 8), []byte("DUCK")...)
+	if err := os.WriteFile(dbPath, append(header, make([]byte, 64)...), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := Open(dbPath)
+	if err == nil {
+		d.Close()
+		t.Fatal("Open accepted a DuckDB database; it would have overwritten it")
+	}
+	if !strings.Contains(err.Error(), "dbmigrate") {
+		t.Errorf("error %q does not point at the migration tool", err)
+	}
+
+	// The file must be left exactly as found — the migrator still needs it.
+	data, readErr := os.ReadFile(dbPath)
+	if readErr != nil {
+		t.Fatalf("reading %s back: %v", dbPath, readErr)
+	}
+	if len(data) != len(header)+64 {
+		t.Errorf("legacy file was modified: %d bytes, want %d", len(data), len(header)+64)
+	}
+
+	// A file that merely shares the name is fine — only the magic decides.
+	fresh := filepath.Join(dir, "fresh.bytdb")
+	d2, err := Open(fresh)
+	if err != nil {
+		t.Fatalf("Open on a new path: %v", err)
+	}
+	d2.Close()
 }
 
 func TestCameraCRUD(t *testing.T) {
@@ -351,9 +471,9 @@ func TestPreviewSettingsRoundtrip(t *testing.T) {
 	}
 }
 
-// TestJSONMigration covers the one-time import of the pre-DuckDB config
-// files: data lands in the DB and the files are renamed so a second Open
-// doesn't re-import over newer edits.
+// TestJSONMigration covers the one-time import of the oldest config format:
+// data lands in the DB and the files are renamed so a second Open doesn't
+// re-import over newer edits.
 func TestJSONMigration(t *testing.T) {
 	dir := t.TempDir()
 	camerasPath := filepath.Join(dir, "cameras.json")
@@ -368,7 +488,7 @@ func TestJSONMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d, err := Open(filepath.Join(dir, "test.db"))
+	d, err := Open(filepath.Join(dir, "test.bytdb"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

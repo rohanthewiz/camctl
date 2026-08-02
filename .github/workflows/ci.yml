@@ -6,8 +6,9 @@
 # an installer path before — both installers now use -tags ndi, but
 # `go build ./...` remains the doc-advertised control-only build.
 #
-# -race requires CGo; DuckDB's Go driver ships prebuilt static libs, so
-# no extra system dependencies are needed on the runner.
+# -race requires CGo. The app itself is pure Go since storage moved to bytdb,
+# but ./... also covers cmd/dbmigrate, whose DuckDB driver is CGo — it ships
+# prebuilt static libs, so no extra system dependencies are needed on the runner.
 name: CI
 
 on:
@@ -33,6 +34,12 @@ jobs:
 
       - name: Build (ndi previewer)
         run: go build -tags ndi ./...
+
+      # Guards the property the installers rely on: the shipped binary must
+      # build with no C toolchain. A stray CGo dependency in the app would
+      # otherwise only show up as a failed install on a user's machine.
+      - name: Build app without CGo
+        run: CGO_ENABLED=0 go build -tags ndi -o /dev/null .
 
       - name: Test (race detector)
         run: go test -race ./...

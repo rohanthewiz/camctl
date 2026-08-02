@@ -1,12 +1,16 @@
 package storage
 
 import (
+	"bytes"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"path/filepath"
 
-	_ "github.com/duckdb/duckdb-go/v2"
+	_ "github.com/rohanthewiz/bytdb/stdlib"
 )
 
 const presetCount = 6
@@ -15,7 +19,18 @@ const presetCount = 6
 // the schema upgrade. See migratePresetsSchema and fanOutLegacyPresets.
 const legacyPresetsTable = "presets_legacy"
 
-// DB wraps a DuckDB connection for camera and preset persistence.
+// DB wraps a bytdb connection for camera and preset persistence.
+//
+// bytdb is reached through its database/sql driver, so the shape of this code
+// is unchanged from the DuckDB original, but the dialect is Postgres-flavored
+// and deliberately small. Three differences drive most of what follows:
+//
+//   - Parameters are $1-style, not ?.
+//   - There is no INSERT OR IGNORE / INSERT OR REPLACE; upserts are spelled
+//     ON CONFLICT (cols) DO NOTHING / DO UPDATE.
+//   - There is no CREATE TABLE IF NOT EXISTS, no DROP TABLE IF EXISTS, and no
+//     multi-statement Exec, so DDL is probed against the catalog first and
+//     issued one statement at a time (see ensureTable).
 type DB struct {
 	db *sql.DB
 }
@@ -66,11 +81,27 @@ type PreviewSettings struct {
 	OBSWSPassword string
 }
 
-// Open opens (or creates) a DuckDB database at dbPath and initializes the schema.
-// If old JSON config files exist alongside the DB, their data is migrated automatically.
+// Open opens (or creates) a bytdb database at dbPath and initializes the schema.
+// If old JSON config files exist alongside the DB, their data is migrated
+// automatically.
 func Open(dbPath string) (*DB, error) {
-	sqlDB, err := sql.Open("duckdb", dbPath)
+	// A DuckDB file handed to bytdb is a silent data-loss trap: bytdb reads the
+	// foreign bytes as a torn write-ahead-log tail, repairs them by truncating,
+	// and reports a perfectly healthy empty database — then overwrites the old
+	// contents on the first commit. Refuse instead, and name the way out.
+	if err := rejectLegacyDuckDBFile(dbPath); err != nil {
+		return nil, err
+	}
+
+	sqlDB, err := sql.Open("bytdb", dbPath)
 	if err != nil {
+		return nil, fmt.Errorf("storage: open %s: %w", dbPath, err)
+	}
+
+	// sql.Open is lazy; Ping is what actually opens the file, so a corrupt or
+	// unreadable database surfaces here rather than from an arbitrary later query.
+	if err := sqlDB.Ping(); err != nil {
+		sqlDB.Close()
 		return nil, fmt.Errorf("storage: open %s: %w", dbPath, err)
 	}
 
@@ -115,19 +146,60 @@ func Open(dbPath string) (*DB, error) {
 	return d, nil
 }
 
+// duckDBMagic identifies a DuckDB database file. DuckDB's header leads with an
+// 8-byte checksum, then the literal "DUCK".
+var duckDBMagic = []byte("DUCK")
+
+const duckDBMagicOffset = 8
+
+// rejectLegacyDuckDBFile reports an error if dbPath is a DuckDB database left
+// over from the pre-bytdb storage backend. A missing or too-short file is fine
+// — that is just a new database about to be created.
+func rejectLegacyDuckDBFile(dbPath string) error {
+	f, err := os.Open(dbPath)
+	if err != nil {
+		return nil // absent (or unreadable) — let the driver decide
+	}
+	defer f.Close()
+
+	head := make([]byte, duckDBMagicOffset+len(duckDBMagic))
+	if _, err := io.ReadFull(f, head); err != nil {
+		return nil // shorter than a DuckDB header, so not one
+	}
+	if !bytes.Equal(head[duckDBMagicOffset:], duckDBMagic) {
+		return nil
+	}
+	return fmt.Errorf(
+		"storage: %s is a DuckDB database from an older camctl; "+
+			"convert it with `go run ./cmd/dbmigrate` (it writes a new .bytdb file "+
+			"and leaves this one untouched)", dbPath)
+}
+
 // Close closes the database connection.
+//
+// bytdb surfaces deferred background failures (WAL sync, compaction, the TTL
+// sweeper) from Close, so its error is worth propagating rather than ignoring.
 func (d *DB) Close() error {
 	return d.db.Close()
 }
 
+// createTables brings the schema up to date.
+//
+// Every statement is issued on its own: bytdb parses one statement per Exec, so
+// the original semicolon-separated block would fail as a syntax error.
 func (d *DB) createTables() error {
-	_, err := d.db.Exec(`
-		CREATE TABLE IF NOT EXISTS cameras (
+	err := d.ensureTable("cameras", `
+		CREATE TABLE cameras (
 			label TEXT PRIMARY KEY,
 			ip    TEXT NOT NULL,
 			port  INTEGER NOT NULL
-		);
-		CREATE TABLE IF NOT EXISTS preview_settings (
+		)`)
+	if err != nil {
+		return err
+	}
+
+	err = d.ensureTable("preview_settings", `
+		CREATE TABLE preview_settings (
 			id              INTEGER PRIMARY KEY DEFAULT 1,
 			enable_ndi      BOOLEAN NOT NULL DEFAULT true,
 			enable_obs      BOOLEAN NOT NULL DEFAULT false,
@@ -135,30 +207,48 @@ func (d *DB) createTables() error {
 			enable_rtsp     BOOLEAN NOT NULL DEFAULT false,
 			obs_ws_host     TEXT NOT NULL DEFAULT '',
 			obs_ws_password TEXT NOT NULL DEFAULT ''
-		);
-	`)
+		)`)
 	if err != nil {
 		return err
 	}
 
 	// Get the old single-set presets table out of the way before creating the
-	// per-camera one — CREATE TABLE IF NOT EXISTS would silently keep the old
-	// shape and every later query would fail on the missing column.
+	// per-camera one — otherwise ensureTable would see a "presets" table, judge
+	// the schema present, and every later query would fail on the missing column.
 	if err := d.migratePresetsSchema(); err != nil {
 		return err
 	}
 
-	// No FOREIGN KEY to cameras: DuckDB does not support ON DELETE CASCADE, and
-	// an un-cascaded FK would block camera deletion. The camera operations below
-	// keep preset rows in step by hand (delete on remove, re-key on rename).
-	_, err = d.db.Exec(`
-		CREATE TABLE IF NOT EXISTS presets (
+	// No FOREIGN KEY to cameras. bytdb does support ON DELETE CASCADE, but the
+	// parent key would have to be cameras.label — the very column a rename
+	// changes, and bytdb (like Postgres) has no ON UPDATE CASCADE. A rename
+	// would be refused while preset rows referenced the old label. The camera
+	// operations below keep preset rows in step by hand instead (delete on
+	// remove, re-key on rename).
+	//
+	// The composite primary key doubles as the read path: (camera_label, number)
+	// makes "all presets for one camera, in slot order" an ordered prefix scan
+	// rather than a full table scan.
+	return d.ensureTable("presets", `
+		CREATE TABLE presets (
 			camera_label TEXT    NOT NULL,
 			number       INTEGER NOT NULL,
 			label        TEXT    NOT NULL,
 			PRIMARY KEY (camera_label, number)
-		);
-	`)
+		)`)
+}
+
+// ensureTable creates a table if the catalog does not already list it.
+//
+// This stands in for CREATE TABLE IF NOT EXISTS, which bytdb does not have.
+// Checking first (rather than creating and swallowing "table already exists")
+// keeps a genuine DDL failure from being mistaken for an existing table.
+func (d *DB) ensureTable(name, ddl string) error {
+	exists, err := d.tableExists(name)
+	if err != nil || exists {
+		return err
+	}
+	_, err = d.db.Exec(ddl)
 	return err
 }
 
@@ -185,7 +275,7 @@ func (d *DB) migratePresetsSchema() error {
 
 	// A leftover holding table from an interrupted earlier migration would
 	// collide with the rename, so clear it first.
-	if _, err := d.db.Exec("DROP TABLE IF EXISTS " + legacyPresetsTable); err != nil {
+	if err := d.dropTableIfExists(legacyPresetsTable); err != nil {
 		return err
 	}
 	if _, err := d.db.Exec("ALTER TABLE presets RENAME TO " + legacyPresetsTable); err != nil {
@@ -196,15 +286,24 @@ func (d *DB) migratePresetsSchema() error {
 }
 
 // fanOutLegacyPresets copies the parked global preset labels onto every saved
-// camera, then drops the holding table. INSERT OR IGNORE means a camera that
-// already has its own labels keeps them.
+// camera, then drops the holding table. The insert ignores conflicts, so a
+// camera that already has its own labels keeps them.
 //
 // With no cameras saved there is nothing to attach the labels to — the slots
 // were unreachable anyway, since recall requires a connection — so the holding
 // table is simply dropped and each camera starts from placeholder names.
+//
+// The rows are read into memory before being written back because bytdb has no
+// INSERT ... SELECT. That is safe at this size (one global set, six slots) and
+// also avoids writing to a table while iterating a cursor over it.
 func (d *DB) fanOutLegacyPresets() error {
 	exists, err := d.tableExists(legacyPresetsTable)
 	if err != nil || !exists {
+		return err
+	}
+
+	legacy, err := d.legacyPresets()
+	if err != nil {
 		return err
 	}
 
@@ -213,13 +312,10 @@ func (d *DB) fanOutLegacyPresets() error {
 		return err
 	}
 	for _, cam := range cams {
-		_, err := d.db.Exec(
-			"INSERT OR IGNORE INTO presets (camera_label, number, label) "+
-				"SELECT ?, number, label FROM "+legacyPresetsTable,
-			cam.Label,
-		)
-		if err != nil {
-			return err
+		for _, p := range legacy {
+			if err := d.insertPresetIfAbsent(cam.Label, p.Number, p.Label); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -230,7 +326,40 @@ func (d *DB) fanOutLegacyPresets() error {
 	return nil
 }
 
+// legacyPresets reads the parked global preset labels.
+func (d *DB) legacyPresets() ([]Preset, error) {
+	rows, err := d.db.Query("SELECT number, label FROM " + legacyPresetsTable + " ORDER BY number")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Preset
+	for rows.Next() {
+		var p Preset
+		if err := rows.Scan(&p.Number, &p.Label); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// insertPresetIfAbsent writes one preset row, leaving an existing row for the
+// same (camera, slot) alone. The DuckDB original spelled this INSERT OR IGNORE.
+func (d *DB) insertPresetIfAbsent(cameraLabel string, num int, label string) error {
+	_, err := d.db.Exec(
+		`INSERT INTO presets (camera_label, number, label) VALUES ($1, $2, $3)
+		 ON CONFLICT (camera_label, number) DO NOTHING`,
+		cameraLabel, num, label,
+	)
+	return err
+}
+
 // pruneOrphanPresets deletes preset rows that no saved camera claims.
+//
+// With no cameras saved the subquery is empty and every preset row is an
+// orphan, which is the intended reading: labels for cameras that are gone.
 func (d *DB) pruneOrphanPresets() error {
 	_, err := d.db.Exec(
 		"DELETE FROM presets WHERE camera_label NOT IN (SELECT label FROM cameras)")
@@ -241,7 +370,7 @@ func (d *DB) pruneOrphanPresets() error {
 // An empty (non-nil) map means the table does not exist.
 func (d *DB) tableColumns(table string) (map[string]bool, error) {
 	rows, err := d.db.Query(
-		"SELECT column_name FROM information_schema.columns WHERE table_name = ?", table)
+		"SELECT column_name FROM information_schema.columns WHERE table_name = $1", table)
 	if err != nil {
 		return nil, err
 	}
@@ -261,25 +390,32 @@ func (d *DB) tableColumns(table string) (map[string]bool, error) {
 func (d *DB) tableExists(table string) (bool, error) {
 	var n int
 	err := d.db.QueryRow(
-		"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", table).Scan(&n)
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1", table).Scan(&n)
 	return n > 0, err
+}
+
+// dropTableIfExists stands in for DROP TABLE IF EXISTS, which bytdb does not
+// have — a plain DROP of an absent table is an error there.
+func (d *DB) dropTableIfExists(table string) error {
+	exists, err := d.tableExists(table)
+	if err != nil || !exists {
+		return err
+	}
+	_, err = d.db.Exec("DROP TABLE " + table)
+	return err
 }
 
 // ensurePresets tops up a camera's slots with placeholder labels.
 //
 // Seeding is lazy — done on read and on camera insert — rather than a separate
 // provisioning step, so cameras that predate this schema (or arrive via JSON
-// migration) also get a full set. Each slot is inserted individually with
-// INSERT OR IGNORE because existing rows are not necessarily a contiguous
+// migration) also get a full set. Each slot is inserted individually and
+// conflicts are ignored, because existing rows are not necessarily a contiguous
 // prefix: JSON migration can import sparse slot numbers (e.g. only 0 and 3),
 // which a count-based starting index would leave with gaps.
 func (d *DB) ensurePresets(cameraLabel string) error {
 	for i := range presetCount {
-		_, err := d.db.Exec(
-			"INSERT OR IGNORE INTO presets (camera_label, number, label) VALUES (?, ?, ?)",
-			cameraLabel, i, defaultPresetLabel(i),
-		)
-		if err != nil {
+		if err := d.insertPresetIfAbsent(cameraLabel, i, defaultPresetLabel(i)); err != nil {
 			return err
 		}
 	}
@@ -322,11 +458,12 @@ func (d *DB) UpsertCamera(cam Camera) error {
 //
 // Kept separate for the JSON migration path: seeding placeholder labels there
 // would occupy the slots that fanOutLegacyPresets is about to fill, and its
-// INSERT OR IGNORE would then skip the user's real names. Lazy seeding on first
-// read still guarantees a full set afterwards.
+// conflict-ignoring insert would then skip the user's real names. Lazy seeding
+// on first read still guarantees a full set afterwards.
 func (d *DB) upsertCameraRow(cam Camera) error {
 	_, err := d.db.Exec(
-		"INSERT OR REPLACE INTO cameras (label, ip, port) VALUES (?, ?, ?)",
+		`INSERT INTO cameras (label, ip, port) VALUES ($1, $2, $3)
+		 ON CONFLICT (label) DO UPDATE SET ip = excluded.ip, port = excluded.port`,
 		cam.Label, cam.IP, cam.Port,
 	)
 	return err
@@ -337,7 +474,7 @@ func (d *DB) upsertCameraRow(cam Camera) error {
 func (d *DB) UpdateCamera(oldLabel string, cam Camera) error {
 	if oldLabel == cam.Label {
 		res, err := d.db.Exec(
-			"UPDATE cameras SET ip = ?, port = ? WHERE label = ?",
+			"UPDATE cameras SET ip = $1, port = $2 WHERE label = $3",
 			cam.IP, cam.Port, oldLabel,
 		)
 		if err != nil {
@@ -357,7 +494,7 @@ func (d *DB) UpdateCamera(oldLabel string, cam Camera) error {
 	}
 	defer tx.Rollback()
 
-	res, err := tx.Exec("DELETE FROM cameras WHERE label = ?", oldLabel)
+	res, err := tx.Exec("DELETE FROM cameras WHERE label = $1", oldLabel)
 	if err != nil {
 		return err
 	}
@@ -366,7 +503,7 @@ func (d *DB) UpdateCamera(oldLabel string, cam Camera) error {
 		return fmt.Errorf("camera %q not found", oldLabel)
 	}
 	_, err = tx.Exec(
-		"INSERT INTO cameras (label, ip, port) VALUES (?, ?, ?)",
+		"INSERT INTO cameras (label, ip, port) VALUES ($1, $2, $3)",
 		cam.Label, cam.IP, cam.Port,
 	)
 	if err != nil {
@@ -379,11 +516,11 @@ func (d *DB) UpdateCamera(oldLabel string, cam Camera) error {
 	// Any stale rows already sitting under the new label (from a camera deleted
 	// outside this code path) are cleared first so the re-key can't hit the
 	// composite primary key.
-	if _, err := tx.Exec("DELETE FROM presets WHERE camera_label = ?", cam.Label); err != nil {
+	if _, err := tx.Exec("DELETE FROM presets WHERE camera_label = $1", cam.Label); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(
-		"UPDATE presets SET camera_label = ? WHERE camera_label = ?", cam.Label, oldLabel,
+		"UPDATE presets SET camera_label = $1 WHERE camera_label = $2", cam.Label, oldLabel,
 	); err != nil {
 		return err
 	}
@@ -391,8 +528,8 @@ func (d *DB) UpdateCamera(oldLabel string, cam Camera) error {
 }
 
 // RemoveCamera deletes the camera with the given label along with its preset
-// labels (no-op if not found). The cascade is done by hand because DuckDB
-// foreign keys cannot use ON DELETE CASCADE.
+// labels (no-op if not found). The cascade is done by hand rather than with a
+// foreign key so that camera renames stay possible — see createTables.
 func (d *DB) RemoveCamera(label string) error {
 	tx, err := d.db.Begin()
 	if err != nil {
@@ -400,10 +537,10 @@ func (d *DB) RemoveCamera(label string) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("DELETE FROM cameras WHERE label = ?", label); err != nil {
+	if _, err := tx.Exec("DELETE FROM cameras WHERE label = $1", label); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM presets WHERE camera_label = ?", label); err != nil {
+	if _, err := tx.Exec("DELETE FROM presets WHERE camera_label = $1", label); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -426,7 +563,7 @@ func (d *DB) AllPresets(cameraLabel string) ([]Preset, error) {
 	}
 
 	rows, err := d.db.Query(
-		"SELECT number, label FROM presets WHERE camera_label = ? ORDER BY number", cameraLabel)
+		"SELECT number, label FROM presets WHERE camera_label = $1 ORDER BY number", cameraLabel)
 	if err != nil {
 		return nil, err
 	}
@@ -449,13 +586,14 @@ func (d *DB) AllPresets(cameraLabel string) ([]Preset, error) {
 // the write correct if a label edit is the first thing that touches a camera.
 func (d *DB) UpdatePresetLabel(cameraLabel string, num int, label string) error {
 	if cameraLabel == "" {
-		return fmt.Errorf("storage: preset labels require a camera")
+		return errors.New("storage: preset labels require a camera")
 	}
 	if num < 0 || num >= presetCount {
 		return fmt.Errorf("storage: invalid preset number %d", num)
 	}
 	_, err := d.db.Exec(
-		"INSERT OR REPLACE INTO presets (camera_label, number, label) VALUES (?, ?, ?)",
+		`INSERT INTO presets (camera_label, number, label) VALUES ($1, $2, $3)
+		 ON CONFLICT (camera_label, number) DO UPDATE SET label = excluded.label`,
 		cameraLabel, num, label,
 	)
 	return err
@@ -492,7 +630,7 @@ func (d *DB) GetPreviewSettings() (PreviewSettings, error) {
 // UpdatePreviewSettings persists the user's preview protocol preferences.
 func (d *DB) UpdatePreviewSettings(ps PreviewSettings) error {
 	_, err := d.db.Exec(
-		"UPDATE preview_settings SET enable_ndi = ?, enable_obs = ?, enable_http = ?, enable_rtsp = ?, obs_ws_host = ?, obs_ws_password = ? WHERE id = 1",
+		"UPDATE preview_settings SET enable_ndi = $1, enable_obs = $2, enable_http = $3, enable_rtsp = $4, obs_ws_host = $5, obs_ws_password = $6 WHERE id = 1",
 		ps.EnableNDI, ps.EnableOBS, ps.EnableHTTP, ps.EnableRTSP, ps.OBSWSHost, ps.OBSWSPassword,
 	)
 	return err
