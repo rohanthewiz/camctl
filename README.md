@@ -71,13 +71,25 @@ uses bytdb at `~/.camctl/camctl.bytdb`. The two file formats are unrelated, so
 the old database is converted rather than opened:
 
 ```sh
-go run ./cmd/dbmigrate          # ~/.camctl/camctl.db -> ~/.camctl/camctl.bytdb
+go run ./cmd/dbmigrate                            # uses the defaults below
+go run ./cmd/dbmigrate -from old.db -to new.bytdb # explicit paths
+go run ./cmd/dbmigrate -force                     # replace an existing target
 ```
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `-from` | `~/.camctl/camctl.db` | Legacy DuckDB database to read |
+| `-to` | `~/.camctl/camctl.bytdb` | bytdb database to create |
+| `-force` | off | Overwrite the destination if it already exists |
 
 Both installers run this automatically when they find an old database and no new
 one, so most people never need to. The old file is only read — it is left in
-place, and you can delete it once camctl looks right. Re-running the converter
-refuses to overwrite an existing `camctl.bytdb` unless you pass `-force`.
+place, and you can delete it once camctl looks right.
+
+Without `-force` the converter refuses to overwrite an existing `camctl.bytdb`,
+which is what makes a second run safe: re-importing would merge the old rows
+back over anything you have changed since, resurrecting deleted cameras and
+stale preset labels.
 
 `cmd/dbmigrate` is the only part of the project that uses DuckDB (and therefore
 CGo); keeping it out of the app is what lets camctl ship as a pure-Go binary.
