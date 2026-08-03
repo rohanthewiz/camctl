@@ -234,12 +234,84 @@ deliberately corrupt legacy file — it warns and the installer continues under
   floor — it moved camctl from 1.25.5 to 1.26.1 without being asked, which then
   has to be reflected in both installers.
 
+## Post-commit: README flags, cleanup, and on-machine verification
+
+Everything below happened after the two commits above, in the same session.
+
+### README: dbmigrate flags (`7f8644a`)
+
+The upgrade section documented only the zero-argument invocation, leaving
+non-default paths to the tool's `-help`. Added three worked examples and a flag
+table (`-from`, `-to`, `-force`) verified against `dbmigrate -help` so the
+documented defaults match the real ones. Also spelled out *why* `-force` exists
+rather than just that it does: without it a second import would merge the old
+rows back over later edits, resurrecting deleted cameras and stale labels.
+
+### Retired the stale DuckDB database
+
+`~/.camctl/camctl.db` was inspected live (read-only, so the check could not
+mutate it) before removal: zero cameras, six placeholder labels, preview
+settings all at defaults — NDI on, no OBS host, no password. Deleted along with
+its `.wal`.
+
+Consequence worth knowing: the installers' auto-conversion triggers on "old file
+present, new file absent", so with the old file gone that step is now a
+permanent no-op on this machine. Correct, since there is nothing left to
+convert. The repo-root `camctl.db` (the `HouseCamm` / `Pulpit` fixture) is
+untouched and gitignored, still usable as a migration test fixture.
+
+### First real run
+
+Ran the built app with no env overrides against the real `~/.camctl`:
+
+- Created `~/.camctl/camctl.bytdb` (1513 bytes) with magic `btydbLOG`. Note
+  `file(1)` misidentifies it as "dBase III DBT" — heuristic sniffing on an
+  unknown format, not a real identification.
+- `/health` → `{"status":"ok"}`; `/` → HTTP 200, ~42 KB.
+- Fresh grid renders six placeholders and "select a camera", as designed.
+- No stray WAL sidecar left behind.
+
+### Camera + preset persistence, end to end
+
+Against the real database, with a fake VISCA camera on 52381 (the app verifies a
+camera responds before saving, so a real connect is required):
+
+```
+add + connect "Sanctuary" 127.0.0.1:52381  -> six placeholders (correct for a new camera)
+label slots 0, 2, 5                        -> Pulpit / Choir Loft / Wide Congregation
+POST /api/preset/set num=0                 -> ok (VISCA write path)
+stop the app entirely
+read the file from disk, app not running   -> camera + all three labels present
+restart                                    -> saved camera list survived
+reconnect                                  -> 0:Pulpit | 2:Choir Loft | 5:Wide Congregation
+```
+
+Two details worth remembering:
+
+- The grid showing "select a camera" with placeholders immediately after a
+  restart is **correct**, not lost data — presets only appear once a camera is
+  selected. Easy to misread as a persistence failure.
+- Every clean shutdown logged `<nil>` from `Close()`. That is the meaningful
+  durability signal for bytdb, which reports deferred WAL-sync and compaction
+  failures from `Close` rather than at write time. A session doc claiming
+  "writes persisted" without checking `Close` is claiming less than it thinks.
+
+### Left clean
+
+Removed the test camera, then deleted `camctl.bytdb` entirely at the user's
+request and relaunched to confirm a pristine recreate: back to 1513 bytes, 0
+cameras, preview settings at defaults.
+
+One observation from the removal step: after add + label + remove, the file had
+grown 1513 -> 3475 bytes. bytdb's log is append-only, so the history stays on
+disk until compaction; reads correctly returned 0 cameras. Not residual data,
+but worth knowing before anyone reads file size as a row count.
+
 ## Outstanding
 
-- `.cats-todo/todos.json` still marks the bytdb item open — left for the user to
-  flip after verifying.
 - No LICENSE file (carried over from previous sessions).
 - The rweb `FormValue` buffer-aliasing issue is still worked around app-side via
   `strings.Clone`; upstream `rweb` is unchanged.
-- `~/.camctl/camctl.db` on this machine is now stale; it can be deleted once the
-  app has been run for real.
+
+Resolved this session: the `.cats-todo` bytdb item is marked done, and the stale
+`~/.camctl/camctl.db` is deleted.

@@ -3,7 +3,7 @@
     "id": "acd6d2c6fdd93578",
     "title": "Move the storage backend to github.com/rohanthewiz/bytdb. E…",
     "prompt": "Move the storage backend to github.com/rohanthewiz/bytdb. Ensure the mac installer is updated also",
-    "done": false,
+    "done": true,
     "created": "2026-08-02T11:54:57.897498-05:00"
   }
 ]
