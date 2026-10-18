@@ -30,6 +30,7 @@
 #   CAMCTL_APP_DIR     app dir      (default: $HOME/Applications)
 #   CAMCTL_APP_NAME    app name     (default: CamCtl)
 #   CAMCTL_PORT        app port     (default: 8383)
+#   CAMCTL_AUTOSTART   open at login (default: 1; set 0 to remove the login agent)
 
 set -euo pipefail
 
@@ -40,6 +41,7 @@ CAMCTL_GO_DIR="${CAMCTL_GO_DIR:-$HOME/.local/go}"
 CAMCTL_APP_DIR="${CAMCTL_APP_DIR:-$HOME/Applications}"
 CAMCTL_APP_NAME="${CAMCTL_APP_NAME:-CamCtl}"
 CAMCTL_PORT="${CAMCTL_PORT:-8383}"
+CAMCTL_AUTOSTART="${CAMCTL_AUTOSTART:-1}"
 
 # ---- output helpers --------------------------------------------------------
 
@@ -673,6 +675,59 @@ EOF
   ok "app installed at $app_path"
 }
 
+# ---- launch at login -------------------------------------------------------
+
+# install_login_agent writes a per-user LaunchAgent that opens the app at login.
+# A LaunchAgent rather than a Login Item: adding Login Items from a script goes
+# through System Events, which triggers an Automation permission prompt and
+# fails outright over SSH. The agent only runs `open`, so the app still starts
+# as a normal GUI app (Dock icon, its own camctl child) rather than as a
+# launchd-managed daemon; launchd does not keep it alive or restart it on quit.
+#
+# launchd loads ~/Library/LaunchAgents by itself at login, so the agent is not
+# bootstrapped here: with RunAtLoad that would also open a second copy right now.
+#
+# CAMCTL_AUTOSTART=0 removes an agent left by an earlier install, so re-running
+# with it set is how to turn auto-start off.
+install_login_agent() {
+  local label agents plist
+  label="dev.camctl.CamCtl.autostart"
+  agents="$HOME/Library/LaunchAgents"
+  plist="$agents/$label.plist"
+  LOGIN_AGENT=""
+
+  if [ "$CAMCTL_AUTOSTART" = "0" ]; then
+    if [ -f "$plist" ]; then
+      launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+      rm -f "$plist"
+      ok "removed login agent $plist"
+    fi
+    return
+  fi
+
+  mkdir -p "$agents"
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/open</string>
+    <string>$CAMCTL_APP_DIR/$CAMCTL_APP_NAME.app</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+EOF
+  plutil -lint "$plist" >/dev/null || die "generated an invalid login agent at $plist"
+  LOGIN_AGENT="$plist"
+  ok "CamCtl will open at login ($plist)"
+}
+
 # ---- main ------------------------------------------------------------------
 
 main() {
@@ -685,6 +740,7 @@ main() {
   build_camctl
   migrate_legacy_db
   install_macos_app
+  install_login_agent
 
   printf '\n'
   printf '%s✓ CamCtl %s app installed%s\n' "$C_GREEN" "$CAMCTL_BUILD_ID" "$C_RESET"
@@ -693,6 +749,9 @@ main() {
   printf '  Go:   %s (%s)\n' "$GO_VERSION" "$GO_SOURCE"
   printf '\nOpen %s%s.app%s from Finder, Spotlight, or the Dock.\n' "$C_GREEN" "$CAMCTL_APP_NAME" "$C_RESET"
   printf 'Logs: ~/Library/Logs/CamCtl/camctl.log\n'
+  if [ -n "$LOGIN_AGENT" ]; then
+    printf 'Opens at login; to turn that off, re-run with CAMCTL_AUTOSTART=0\n'
+  fi
   printf 'Data: ~/.camctl/camctl.bytdb\n'
   printf '\nRe-run this installer any time to update to the latest master.\n'
 }
