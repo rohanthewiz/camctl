@@ -247,8 +247,10 @@ build_camctl() {
 # ---- legacy database conversion --------------------------------------------
 
 # migrate_legacy_db converts a DuckDB-era ~/.camctl/camctl.db to the bytdb
-# database camctl now reads. It is a no-op unless the old file exists and the
-# new one does not, so re-running the installer never touches live data.
+# database camctl now reads. It is a no-op unless the old file exists. If the
+# new one exists too, dbmigrate's -replace-empty only overwrites it when it holds
+# no cameras — the placeholder camctl creates when the app is opened before the
+# conversion has run — so re-running the installer never touches live data.
 #
 # The conversion is deliberately non-fatal: a fresh install has nothing to
 # convert, and an operator whose old database cannot be read is better served by
@@ -262,16 +264,17 @@ migrate_legacy_db() {
   target="$data_dir/camctl.bytdb"
 
   [ -f "$legacy" ] || return 0
-  if [ -f "$target" ]; then
-    return 0
-  fi
+  # A marker from an earlier successful conversion: nothing left to do, and no
+  # reason to pay for the CGo build of dbmigrate again.
+  [ -f "$legacy.converted" ] && return 0
 
   info "converting legacy DuckDB database to bytdb"
   # The DuckDB reader needs CGo; this is the only step in the installer that
   # does, which is why it runs on demand rather than as part of the app build.
   if ( cd "$CAMCTL_SRC_DIR" && CGO_ENABLED=1 "$GO_BIN" run ./cmd/dbmigrate \
-         -from "$legacy" -to "$target" ); then
-    ok "converted $legacy -> $target (original kept)"
+         -replace-empty -from "$legacy" -to "$target" ); then
+    : > "$legacy.converted"
+    ok "$target is ready (original $legacy kept)"
   else
     warn "could not convert $legacy; camctl will start with an empty camera list"
     warn "your old data is still there — retry with: cd $CAMCTL_SRC_DIR && go run ./cmd/dbmigrate"

@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/duckdb/duckdb-go/v2 v2.10500.0
-	github.com/ebitengine/purego v0.3.2
+	github.com/ebitengine/purego v0.11.2
 	github.com/rohanthewiz/bytdb v0.8.0
 	github.com/rohanthewiz/element v0.5.5-0.20260204132123-bceae1a2e28b
 	github.com/rohanthewiz/rweb v0.1.23-0.20260223044131-478fc988801e

@@ -81,9 +81,13 @@ go run ./cmd/dbmigrate -force                     # replace an existing target
 | `-from` | `~/.camctl/camctl.db` | Legacy DuckDB database to read |
 | `-to` | `~/.camctl/camctl.bytdb` | bytdb database to create |
 | `-force` | off | Overwrite the destination if it already exists |
+| `-replace-empty` | off | Overwrite the destination only if it has no saved cameras |
 
-Both installers run this automatically when they find an old database and no new
-one, so most people never need to. The old file is only read — it is left in
+Both installers run this automatically (with `-replace-empty`) when they find an
+old database that has not been converted yet, so most people never need to. That
+covers the case where camctl was started before the conversion and created an
+empty `camctl.bytdb`. After a successful run the installers leave a
+`camctl.db.converted` marker so later runs skip the step. The old file is only read — it is left in
 place, and you can delete it once camctl looks right.
 
 Without `-force` the converter refuses to overwrite an existing `camctl.bytdb`,

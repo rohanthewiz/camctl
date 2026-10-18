@@ -64,7 +64,9 @@ ok "camctl installed to $INSTALL_DIR/$BINARY_NAME"
 #
 # camctl moved its storage from DuckDB to bytdb; the file formats are unrelated,
 # so an existing ~/.camctl/camctl.db has to be converted rather than opened.
-# Runs only when the old file exists and the new one does not, so re-running the
+# Runs only when the old file exists and has not already been converted. An
+# existing camctl.bytdb is replaced only if it holds no cameras (the placeholder
+# camctl creates when started before the conversion), so re-running the
 # installer never touches live data. The old file is read, never modified.
 #
 # Non-fatal by design: the app is already installed and working at this point,
@@ -72,11 +74,12 @@ ok "camctl installed to $INSTALL_DIR/$BINARY_NAME"
 # DuckDB reader needs CGo, which is why this is the one step that may want a
 # C toolchain — and only for users who have old data.
 DATA_DIR="$HOME/.camctl"
-if [ -f "$DATA_DIR/camctl.db" ] && [ ! -f "$DATA_DIR/camctl.bytdb" ]; then
+if [ -f "$DATA_DIR/camctl.db" ] && [ ! -f "$DATA_DIR/camctl.db.converted" ]; then
     info "converting legacy DuckDB database to bytdb..."
     if ( cd "$TMPDIR/camctl-src" && CGO_ENABLED=1 go run ./cmd/dbmigrate \
-           -from "$DATA_DIR/camctl.db" -to "$DATA_DIR/camctl.bytdb" ); then
-        ok "converted $DATA_DIR/camctl.db (original kept)"
+           -replace-empty -from "$DATA_DIR/camctl.db" -to "$DATA_DIR/camctl.bytdb" ); then
+        : > "$DATA_DIR/camctl.db.converted"
+        ok "$DATA_DIR/camctl.bytdb is ready (original camctl.db kept)"
     else
         printf "\n\033[1;33mNote:\033[0m could not convert %s\n" "$DATA_DIR/camctl.db"
         echo "camctl will start with an empty camera list; your old data is untouched."

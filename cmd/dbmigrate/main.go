@@ -17,6 +17,7 @@
 //	go run ./cmd/dbmigrate                       # ~/.camctl/camctl.db -> ~/.camctl/camctl.bytdb
 //	go run ./cmd/dbmigrate -from old.db -to new.bytdb
 //	go run ./cmd/dbmigrate -force                # overwrite an existing destination
+//	go run ./cmd/dbmigrate -replace-empty        # overwrite it only if it has no cameras
 //
 // The source database is only ever read; nothing deletes or rewrites it.
 package main
@@ -43,7 +44,22 @@ func main() {
 	from := flag.String("from", defFrom, "path to the legacy DuckDB database")
 	to := flag.String("to", defTo, "path to the bytdb database to create")
 	force := flag.Bool("force", false, "overwrite the destination if it already exists")
+	replaceEmpty := flag.Bool("replace-empty", false, "overwrite the destination only if it has no saved cameras")
 	flag.Parse()
+
+	if *replaceEmpty && !*force {
+		if _, err := os.Stat(*to); err == nil {
+			empty, err := hasNoCameras(*to)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if !empty {
+				log.Printf("%s already has cameras; leaving it alone", *to)
+				return
+			}
+			*force = true
+		}
+	}
 
 	if err := run(*from, *to, *force); err != nil {
 		log.Fatal(err)
@@ -129,6 +145,26 @@ func run(from, to string, force bool) (err error) {
 		len(cams), len(presets), from, to)
 	log.Printf("%s was not modified; remove it once camctl looks right", from)
 	return nil
+}
+
+// hasNoCameras reports whether the bytdb database at path holds no saved
+// cameras. That is the state camctl leaves behind when it starts before the
+// legacy conversion has run: it creates a fresh database on open, and without
+// -replace-empty that placeholder would block the conversion forever. Anything
+// with a camera in it is treated as live data the operator owns.
+func hasNoCameras(path string) (bool, error) {
+	db, err := storage.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("opening %s: %w", path, err)
+	}
+	cams, err := db.AllCameras()
+	if cerr := db.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading cameras from %s: %w", path, err)
+	}
+	return len(cams) == 0, nil
 }
 
 // removeBytdbFiles deletes a bytdb database and the sidecar files an engine may
